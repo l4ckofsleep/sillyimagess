@@ -21,6 +21,7 @@ const defaultSettings = Object.freeze({
     // Nano-banana specific
     sendCharAvatar: false,
     sendUserAvatar: false,
+    userAvatarFile: '', // Selected user avatar filename from /User Avatars/
     aspectRatio: '1:1', // "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
     imageSize: '1K', // "1K", "2K", "4K"
 });
@@ -133,6 +134,34 @@ async function fetchModels() {
     } catch (error) {
         console.error('[IIG] Failed to fetch models:', error);
         toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'Генерация картинок');
+        return [];
+    }
+}
+
+/**
+ * Fetch list of user avatars from /User Avatars/ directory
+ */
+async function fetchUserAvatars() {
+    try {
+        const context = SillyTavern.getContext();
+        const response = await fetch('/api/files/list', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            body: JSON.stringify({
+                folder: 'User Avatars'
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const files = await response.json();
+        // Filter for image files only
+        const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+        return files.filter(f => imageExtensions.some(ext => f.toLowerCase().endsWith(ext)));
+    } catch (error) {
+        console.error('[IIG] Failed to fetch user avatars:', error);
         return [];
     }
 }
@@ -254,59 +283,16 @@ async function getCharacterAvatarBase64() {
  */
 async function getUserAvatarBase64() {
     try {
-        const context = SillyTavern.getContext();
-        let avatarFilename = null;
+        const settings = getSettings();
         
-        // Debug: log all available user avatar sources
-        console.log('[IIG] User avatar debug:', {
-            chatMetadata: context.chatMetadata,
-            name1: context.name1,
-        });
-        
-        // Method 1: Check chat-locked persona (takes precedence over global)
-        // This is stored in chat_metadata['persona'] as the avatar filename
-        if (context.chatMetadata?.persona) {
-            avatarFilename = context.chatMetadata.persona;
-            console.log('[IIG] Method 1 - Chat-locked persona:', avatarFilename);
-        }
-        
-        // Method 2: Find the SELECTED avatar in persona list (has .selected class)
-        if (!avatarFilename) {
-            const selectedAvatar = document.querySelector('#user_avatar_block .avatar.selected');
-            if (selectedAvatar) {
-                const imgSrc = selectedAvatar.querySelector('img')?.src;
-                if (imgSrc) {
-                    const fileMatch = imgSrc.match(/file=([^&]+)/);
-                    if (fileMatch) {
-                        avatarFilename = decodeURIComponent(fileMatch[1]);
-                        console.log('[IIG] Method 2 - Selected avatar from DOM:', avatarFilename);
-                    }
-                }
-            }
-        }
-        
-        // Method 3: Get from any user avatar in the sidebar (fallback)
-        if (!avatarFilename) {
-            const userAvatarImg = document.querySelector('#user_avatar_block .avatar img');
-            if (userAvatarImg?.src) {
-                const srcUrl = userAvatarImg.src;
-                console.log('[IIG] Method 3 - First avatar img src:', srcUrl);
-                const fileMatch = srcUrl.match(/file=([^&]+)/);
-                if (fileMatch) {
-                    avatarFilename = decodeURIComponent(fileMatch[1]);
-                    console.log('[IIG] Method 3 - Fallback avatar filename:', avatarFilename);
-                }
-            }
-        }
-        
-        if (!avatarFilename) {
-            console.log('[IIG] No user avatar found');
+        // Use selected avatar from settings (user's choice)
+        if (!settings.userAvatarFile) {
+            console.log('[IIG] No user avatar selected in settings');
             return null;
         }
         
-        // Build full resolution URL (not thumbnail)
-        const avatarUrl = `/User Avatars/${encodeURIComponent(avatarFilename)}`;
-        console.log('[IIG] Final user avatar URL:', avatarUrl);
+        const avatarUrl = `/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`;
+        console.log('[IIG] Using selected user avatar:', avatarUrl);
         return await imageUrlToBase64(avatarUrl);
     } catch (error) {
         console.error('[IIG] Error getting user avatar:', error);
@@ -1098,6 +1084,18 @@ function createSettingsUI() {
                             <input type="checkbox" id="iig_send_user_avatar" ${settings.sendUserAvatar ? 'checked' : ''}>
                             <span>Отправлять аватар {{user}}</span>
                         </label>
+                        
+                        <!-- User Avatar Selection -->
+                        <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
+                            <label for="iig_user_avatar_file">Аватар {{user}}</label>
+                            <select id="iig_user_avatar_file" class="flex1">
+                                <option value="">-- Не выбран --</option>
+                                ${settings.userAvatarFile ? `<option value="${settings.userAvatarFile}" selected>${settings.userAvatarFile}</option>` : ''}
+                            </select>
+                            <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
+                                <i class="fa-solid fa-sync"></i>
+                            </div>
+                        </div>
                     </div>
                     
                     <hr>
@@ -1254,6 +1252,46 @@ function bindSettingsEvents() {
     document.getElementById('iig_send_user_avatar')?.addEventListener('change', (e) => {
         settings.sendUserAvatar = e.target.checked;
         saveSettings();
+        
+        // Show/hide avatar selection row
+        const avatarRow = document.getElementById('iig_user_avatar_row');
+        if (avatarRow) {
+            avatarRow.classList.toggle('hidden', !e.target.checked);
+        }
+    });
+    
+    // User avatar file selection
+    document.getElementById('iig_user_avatar_file')?.addEventListener('change', (e) => {
+        settings.userAvatarFile = e.target.value;
+        saveSettings();
+    });
+    
+    // Refresh user avatars list
+    document.getElementById('iig_refresh_avatars')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.classList.add('loading');
+        
+        try {
+            const avatars = await fetchUserAvatars();
+            const select = document.getElementById('iig_user_avatar_file');
+            const currentAvatar = settings.userAvatarFile;
+            
+            select.innerHTML = '<option value="">-- Не выбран --</option>';
+            
+            for (const avatar of avatars) {
+                const option = document.createElement('option');
+                option.value = avatar;
+                option.textContent = avatar;
+                option.selected = avatar === currentAvatar;
+                select.appendChild(option);
+            }
+            
+            toastr.success(`Найдено аватаров: ${avatars.length}`, 'Генерация картинок');
+        } catch (error) {
+            toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
+        } finally {
+            btn.classList.remove('loading');
+        }
     });
     
     // Max retries
