@@ -255,53 +255,57 @@ async function getCharacterAvatarBase64() {
 async function getUserAvatarBase64() {
     try {
         const context = SillyTavern.getContext();
-        let avatarUrl = null;
+        let avatarFilename = null;
         
         // Debug: log all available user avatar sources
         console.log('[IIG] User avatar debug:', {
-            persona: context.persona,
-            personas: context.personas ? Object.keys(context.personas) : null,
-            user_avatar: context.user_avatar,
+            chatMetadata: context.chatMetadata,
             name1: context.name1,
-            default_avatar: context.default_avatar,
         });
         
-        // Get persona/user avatar filename - prefer direct file path over thumbnail
-        // Method 1: Check active persona in personas object
-        if (context.personas && context.persona && context.personas[context.persona]) {
-            // persona is the key, get the avatar filename from personas object
-            const personaData = context.personas[context.persona];
-            const avatarFile = typeof personaData === 'string' ? personaData : context.persona;
-            avatarUrl = `/User Avatars/${encodeURIComponent(avatarFile)}`;
-            console.log('[IIG] Method 1 - Using persona from personas object:', avatarUrl);
+        // Method 1: Check chat-locked persona (takes precedence over global)
+        // This is stored in chat_metadata['persona'] as the avatar filename
+        if (context.chatMetadata?.persona) {
+            avatarFilename = context.chatMetadata.persona;
+            console.log('[IIG] Method 1 - Chat-locked persona:', avatarFilename);
         }
         
-        // Method 2: Try to get from user_avatar setting
-        if (!avatarUrl && context.user_avatar) {
-            avatarUrl = `/User Avatars/${encodeURIComponent(context.user_avatar)}`;
-            console.log('[IIG] Method 2 - Using user_avatar:', avatarUrl);
-        }
-        
-        // Method 3: Get filename from DOM and construct direct path
-        if (!avatarUrl) {
-            const userAvatarImg = document.querySelector('#user_avatar_block img');
-            if (userAvatarImg?.src) {
-                // Extract filename from thumbnail URL or src
-                const srcUrl = userAvatarImg.src;
-                console.log('[IIG] Method 3 - DOM img src:', srcUrl);
-                const fileMatch = srcUrl.match(/file=([^&]+)/);
-                if (fileMatch) {
-                    avatarUrl = `/User Avatars/${decodeURIComponent(fileMatch[1])}`;
-                    console.log('[IIG] Method 3 - Extracted avatar filename:', avatarUrl);
+        // Method 2: Find the SELECTED avatar in persona list (has .selected class)
+        if (!avatarFilename) {
+            const selectedAvatar = document.querySelector('#user_avatar_block .avatar.selected');
+            if (selectedAvatar) {
+                const imgSrc = selectedAvatar.querySelector('img')?.src;
+                if (imgSrc) {
+                    const fileMatch = imgSrc.match(/file=([^&]+)/);
+                    if (fileMatch) {
+                        avatarFilename = decodeURIComponent(fileMatch[1]);
+                        console.log('[IIG] Method 2 - Selected avatar from DOM:', avatarFilename);
+                    }
                 }
             }
         }
         
-        if (!avatarUrl) {
+        // Method 3: Get from any user avatar in the sidebar (fallback)
+        if (!avatarFilename) {
+            const userAvatarImg = document.querySelector('#user_avatar_block .avatar img');
+            if (userAvatarImg?.src) {
+                const srcUrl = userAvatarImg.src;
+                console.log('[IIG] Method 3 - First avatar img src:', srcUrl);
+                const fileMatch = srcUrl.match(/file=([^&]+)/);
+                if (fileMatch) {
+                    avatarFilename = decodeURIComponent(fileMatch[1]);
+                    console.log('[IIG] Method 3 - Fallback avatar filename:', avatarFilename);
+                }
+            }
+        }
+        
+        if (!avatarFilename) {
             console.log('[IIG] No user avatar found');
             return null;
         }
         
+        // Build full resolution URL (not thumbnail)
+        const avatarUrl = `/User Avatars/${encodeURIComponent(avatarFilename)}`;
         console.log('[IIG] Final user avatar URL:', avatarUrl);
         return await imageUrlToBase64(avatarUrl);
     } catch (error) {
