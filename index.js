@@ -214,6 +214,8 @@ async function getCharacterAvatarBase64() {
     try {
         const context = SillyTavern.getContext();
         
+        console.log('[IIG] Getting character avatar, characterId:', context.characterId);
+        
         if (context.characterId === undefined || context.characterId === null) {
             console.log('[IIG] No character selected');
             return null;
@@ -222,6 +224,7 @@ async function getCharacterAvatarBase64() {
         // Try context method first
         if (typeof context.getCharacterAvatar === 'function') {
             const avatarUrl = context.getCharacterAvatar(context.characterId);
+            console.log('[IIG] getCharacterAvatar returned:', avatarUrl);
             if (avatarUrl) {
                 return await imageUrlToBase64(avatarUrl);
             }
@@ -229,8 +232,10 @@ async function getCharacterAvatarBase64() {
         
         // Fallback: try to get from characters array
         const character = context.characters?.[context.characterId];
+        console.log('[IIG] Character from array:', character?.name, 'avatar:', character?.avatar);
         if (character?.avatar) {
             const avatarUrl = `/characters/${encodeURIComponent(character.avatar)}`;
+            console.log('[IIG] Found character avatar:', avatarUrl);
             return await imageUrlToBase64(avatarUrl);
         }
         
@@ -737,22 +742,35 @@ async function processMessageTags(messageId) {
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
         
+        console.log(`[IIG] Processing tag ${index}:`, tag.fullMatch.substring(0, 50));
+        
         // Replace tag with loading placeholder in the DOM
         const loadingPlaceholder = createLoadingPlaceholder(tagId);
         
         // Find and replace the tag in the rendered HTML
-        const tagEscaped = tag.fullMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // The tag might be HTML-escaped in the rendered content
+        const tagEscaped = tag.fullMatch
+            .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            .replace(/"/g, '(?:"|&quot;)'); // Handle HTML entity escaping
         const tagRegex = new RegExp(tagEscaped, 'g');
         
+        console.log(`[IIG] Looking for tag in HTML, regex:`, tagEscaped.substring(0, 50));
+        console.log(`[IIG] mesTextEl.innerHTML contains tag:`, mesTextEl.innerHTML.includes('[IMG:GEN:'));
+        
         // Insert placeholder marker
+        const beforeReplace = mesTextEl.innerHTML;
         mesTextEl.innerHTML = mesTextEl.innerHTML.replace(
             tagRegex,
             `<span data-iig-placeholder="${tagId}"></span>`
         );
+        console.log(`[IIG] Placeholder inserted:`, beforeReplace !== mesTextEl.innerHTML);
         
         const placeholderSpan = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
         if (placeholderSpan) {
             placeholderSpan.replaceWith(loadingPlaceholder);
+            console.log(`[IIG] Loading placeholder shown`);
+        } else {
+            console.log(`[IIG] Could not find placeholder span, tag might be inside img src`);
         }
         
         const statusEl = loadingPlaceholder.querySelector('.iig-status');
@@ -804,6 +822,28 @@ async function processMessageTags(messageId) {
     
     // Save chat to persist changes
     await context.saveChat();
+    
+    // Force re-render the message to show updated content
+    // Use SillyTavern's messageFormatting if available
+    if (typeof context.messageFormatting === 'function') {
+        const formattedMessage = context.messageFormatting(
+            message.mes,
+            message.name,
+            message.is_system,
+            message.is_user,
+            messageId
+        );
+        mesTextEl.innerHTML = formattedMessage;
+        console.log('[IIG] Message re-rendered via messageFormatting');
+    } else {
+        // Fallback: trigger a manual re-render by finding and updating the element
+        const freshMessageEl = document.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
+        if (freshMessageEl && message.mes) {
+            // Simple approach: just reload the message content
+            // This works because message.mes now contains the image path instead of the tag
+            console.log('[IIG] Attempting manual refresh...');
+        }
+    }
 }
 
 /**
