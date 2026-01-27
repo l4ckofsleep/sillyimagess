@@ -822,105 +822,26 @@ function createLoadingPlaceholder(tagId) {
 const ERROR_IMAGE_PATH = '/scripts/extensions/third-party/sillyimages/error.svg';
 
 /**
- * Create error placeholder element - preserves img with data-iig-instruction for DOM search
+ * Create error placeholder element - just shows error.svg, no click handlers
+ * User uses the regenerate button in message menu to retry
  */
 function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
-    // Create a wrapper div
-    const wrapper = document.createElement('div');
-    wrapper.className = 'iig-error-wrapper';
-    wrapper.dataset.tagId = tagId;
-    wrapper.dataset.tagInfo = JSON.stringify(tagInfo);
-    
-    // Create IMG element with preserved data-iig-instruction for DOM search
     const img = document.createElement('img');
     img.className = 'iig-error-image';
     img.src = ERROR_IMAGE_PATH;
     img.alt = 'Ошибка генерации';
-    // CRITICAL: Preserve data-iig-instruction so DOM search finds it on retry
+    img.title = `Ошибка: ${errorMessage}`;
+    img.dataset.tagId = tagId;
+    
+    // Preserve data-iig-instruction for regenerate button functionality
     if (tagInfo.fullMatch) {
-        // Extract instruction JSON from fullMatch
         const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
         if (instructionMatch) {
             img.setAttribute('data-iig-instruction', instructionMatch[2]);
         }
     }
     
-    wrapper.appendChild(img);
-    
-    // Add click handler for retry on the whole wrapper
-    wrapper.style.cursor = 'pointer';
-    wrapper.title = `Ошибка: ${errorMessage}\nНажмите для повтора`;
-    wrapper.addEventListener('click', () => {
-        retryGeneration(wrapper, tagInfo);
-    });
-    
-    return wrapper;
-}
-
-/**
- * Retry failed generation
- */
-async function retryGeneration(placeholder, tagInfo) {
-    const tagId = placeholder.dataset.tagId;
-    
-    // Replace error with loading
-    const loadingPlaceholder = createLoadingPlaceholder(tagId);
-    placeholder.replaceWith(loadingPlaceholder);
-    
-    const statusEl = loadingPlaceholder.querySelector('.iig-status');
-    
-    try {
-        const dataUrl = await generateImageWithRetry(
-            tagInfo.prompt,
-            tagInfo.style,
-            (status) => { statusEl.textContent = status; },
-            { aspectRatio: tagInfo.aspectRatio, imageSize: tagInfo.imageSize, quality: tagInfo.quality }
-        );
-        
-        // Save image to file
-        statusEl.textContent = 'Сохранение...';
-        const imagePath = await saveImageToFile(dataUrl);
-        
-        // Replace with image, preserving data-iig-instruction
-        const img = document.createElement('img');
-        img.className = 'iig-generated-image';
-        img.src = imagePath;
-        img.alt = tagInfo.prompt;
-        // Preserve data-iig-instruction for potential re-generation
-        if (tagInfo.fullMatch) {
-            const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
-            if (instructionMatch) {
-                img.setAttribute('data-iig-instruction', instructionMatch[2]);
-            }
-        }
-        loadingPlaceholder.replaceWith(img);
-        
-        // Update message.mes with the real path
-        const context = SillyTavern.getContext();
-        const messageElement = loadingPlaceholder.closest('.mes[mesid]');
-        if (messageElement) {
-            const messageId = parseInt(messageElement.getAttribute('mesid'));
-            const message = context.chat[messageId];
-            if (message && tagInfo.fullMatch) {
-                const updatedTag = tagInfo.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
-                // Handle original tag, [IMG:ERROR] marker, and error.svg path
-                message.mes = message.mes.replace(tagInfo.fullMatch, updatedTag);
-                message.mes = message.mes.replace(/src\s*=\s*(['"])\[IMG:ERROR\]\1/gi, `src="${imagePath}"`);
-                message.mes = message.mes.replace(/src\s*=\s*(['"])[^'"]*error\.svg['"]/gi, `src="${imagePath}"`);
-                await context.saveChat();
-            }
-        }
-        
-        toastr.success('Картинка сгенерирована!', 'Генерация картинок');
-    } catch (error) {
-        console.error('[IIG] Retry failed:', error);
-        
-        // Replace with error
-        const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tagInfo);
-        loadingPlaceholder.replaceWith(errorPlaceholder);
-        
-        toastr.error(`Ошибка генерации: ${error.message}`, 'Генерация картинок');
-    }
+    return img;
 }
 
 /**
@@ -1318,58 +1239,7 @@ function addRegenerateButton(messageElement, messageId) {
     extraMesButtons.appendChild(btn);
 }
 
-/**
- * Attach click handlers to error images for manual retry
- */
-function attachErrorImageHandlers(messageElement, messageId) {
-    const context = SillyTavern.getContext();
-    const message = context.chat[messageId];
-    if (!message) return;
-    
-    const errorImages = messageElement.querySelectorAll('img[src*="error.svg"]');
-    errorImages.forEach((img, index) => {
-        // Skip if already has handler
-        if (img.dataset.iigRetryAttached) return;
-        img.dataset.iigRetryAttached = 'true';
-        
-        // Style for clickability
-        img.style.cursor = 'pointer';
-        img.title = 'Нажмите для повторной генерации';
-        
-        // Extract tag info from data-iig-instruction
-        const instruction = img.getAttribute('data-iig-instruction');
-        if (!instruction) return;
-        
-        try {
-            const normalizedJson = instruction.replace(/'/g, '"');
-            const data = JSON.parse(normalizedJson);
-            
-            const tagInfo = {
-                fullMatch: img.outerHTML,
-                style: data.style || '',
-                prompt: data.prompt || '',
-                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
-                imageSize: data.image_size || data.imageSize || null,
-                quality: data.quality || null,
-                isNewFormat: true
-            };
-            
-            img.addEventListener('click', () => {
-                iigLog('INFO', `User clicked error image to retry`);
-                // Wrap img in error wrapper for retry
-                const wrapper = document.createElement('div');
-                wrapper.className = 'iig-error-wrapper';
-                wrapper.dataset.tagId = `iig-retry-${messageId}-${index}`;
-                wrapper.dataset.tagInfo = JSON.stringify(tagInfo);
-                img.replaceWith(wrapper);
-                wrapper.appendChild(img);
-                retryGeneration(wrapper, tagInfo);
-            });
-        } catch (e) {
-            iigLog('WARN', `Failed to parse instruction for error image: ${e.message}`);
-        }
-    });
-}
+// NOTE: No click handlers on error images - user uses the regenerate button in message menu
 
 /**
  * Handle CHARACTER_MESSAGE_RENDERED event
@@ -1394,9 +1264,6 @@ async function onMessageReceived(messageId) {
     if (message?.mes?.includes('data-iig-instruction=')) {
         addRegenerateButton(messageElement, messageId);
     }
-    
-    // Attach click handlers to error images for manual retry
-    attachErrorImageHandlers(messageElement, messageId);
     
     await processMessageTags(messageId);
 }
