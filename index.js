@@ -1156,23 +1156,23 @@ async function regenerateMessageImages(messageId) {
 }
 
 /**
- * Add regenerate button to message
+ * Add regenerate button to message extra menu (three dots)
  */
 function addRegenerateButton(messageElement, messageId) {
     // Check if button already exists
     if (messageElement.querySelector('.iig-regenerate-btn')) return;
     
-    // Find the message actions area
-    const actionsArea = messageElement.querySelector('.mes_buttons');
-    if (!actionsArea) return;
+    // Find the extraMesButtons container (three dots menu)
+    const extraMesButtons = messageElement.querySelector('.extraMesButtons');
+    if (!extraMesButtons) return;
     
     const btn = document.createElement('div');
-    btn.className = 'mes_button iig-regenerate-btn';
+    btn.className = 'mes_button iig-regenerate-btn fa-solid fa-images';
     btn.title = 'Перегенерировать картинки';
-    btn.innerHTML = '<i class="fa-solid fa-images"></i>';
+    btn.dataset.i18n = '[title]Перегенерировать картинки';
     btn.addEventListener('click', () => regenerateMessageImages(messageId));
     
-    actionsArea.appendChild(btn);
+    extraMesButtons.appendChild(btn);
 }
 
 /**

@@ -155,17 +155,4 @@
     cursor: pointer;
 }
 
-/* Regenerate button in message */
-.iig-regenerate-btn {
-    cursor: pointer;
-    opacity: 0.7;
-    transition: opacity 0.2s;
-}
-
-.iig-regenerate-btn:hover {
-    opacity: 1;
-}
-
-.iig-regenerate-btn i {
-    color: var(--SmartThemeBodyColor);
-}
+/* Regenerate button in message extra menu - inherits mes_button styling */
