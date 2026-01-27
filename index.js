@@ -654,19 +654,22 @@ async function parseImageTags(text, options = {}) {
         // Determine if this needs generation
         let needsGeneration = false;
         const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
-        const hasErrorImage = srcValue.includes('error.svg'); // Our error placeholder image
+        const hasErrorImage = srcValue.includes('error.svg'); // Our error placeholder - NO auto-retry
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
         
+        // Skip error images - user must click to retry manually (prevents conflict on swipe)
+        if (hasErrorImage && !forceAll) {
+            iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
+            continue;
+        }
+        
         if (forceAll) {
-            // Regeneration mode: include all tags with instruction
+            // Regeneration mode: include all tags with instruction (user-triggered)
             needsGeneration = true;
             iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
-        } else if (hasMarker || !srcValue || hasErrorImage) {
-            // Explicit marker, empty src, or error image = needs generation
+        } else if (hasMarker || !srcValue) {
+            // Explicit marker or empty src = needs generation
             needsGeneration = true;
-            if (hasErrorImage) {
-                iigLog('INFO', `Found error image, will retry generation`);
-            }
         } else if (hasPath && checkExistence) {
             // Has a path - check if file actually exists
             const exists = await checkFileExists(srcValue);
@@ -1316,6 +1319,59 @@ function addRegenerateButton(messageElement, messageId) {
 }
 
 /**
+ * Attach click handlers to error images for manual retry
+ */
+function attachErrorImageHandlers(messageElement, messageId) {
+    const context = SillyTavern.getContext();
+    const message = context.chat[messageId];
+    if (!message) return;
+    
+    const errorImages = messageElement.querySelectorAll('img[src*="error.svg"]');
+    errorImages.forEach((img, index) => {
+        // Skip if already has handler
+        if (img.dataset.iigRetryAttached) return;
+        img.dataset.iigRetryAttached = 'true';
+        
+        // Style for clickability
+        img.style.cursor = 'pointer';
+        img.title = 'Нажмите для повторной генерации';
+        
+        // Extract tag info from data-iig-instruction
+        const instruction = img.getAttribute('data-iig-instruction');
+        if (!instruction) return;
+        
+        try {
+            const normalizedJson = instruction.replace(/'/g, '"');
+            const data = JSON.parse(normalizedJson);
+            
+            const tagInfo = {
+                fullMatch: img.outerHTML,
+                style: data.style || '',
+                prompt: data.prompt || '',
+                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
+                imageSize: data.image_size || data.imageSize || null,
+                quality: data.quality || null,
+                isNewFormat: true
+            };
+            
+            img.addEventListener('click', () => {
+                iigLog('INFO', `User clicked error image to retry`);
+                // Wrap img in error wrapper for retry
+                const wrapper = document.createElement('div');
+                wrapper.className = 'iig-error-wrapper';
+                wrapper.dataset.tagId = `iig-retry-${messageId}-${index}`;
+                wrapper.dataset.tagInfo = JSON.stringify(tagInfo);
+                img.replaceWith(wrapper);
+                wrapper.appendChild(img);
+                retryGeneration(wrapper, tagInfo);
+            });
+        } catch (e) {
+            iigLog('WARN', `Failed to parse instruction for error image: ${e.message}`);
+        }
+    });
+}
+
+/**
  * Handle CHARACTER_MESSAGE_RENDERED event
  * This fires AFTER the message is rendered to DOM
  */
@@ -1331,11 +1387,16 @@ async function onMessageReceived(messageId) {
     const context = SillyTavern.getContext();
     const message = context.chat[messageId];
     
-    // Add regenerate button if message has data-iig-instruction tags
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-    if (messageElement && message?.mes?.includes('data-iig-instruction=')) {
+    if (!messageElement) return;
+    
+    // Add regenerate button if message has data-iig-instruction tags
+    if (message?.mes?.includes('data-iig-instruction=')) {
         addRegenerateButton(messageElement, messageId);
     }
+    
+    // Attach click handlers to error images for manual retry
+    attachErrorImageHandlers(messageElement, messageId);
     
     await processMessageTags(messageId);
 }
