@@ -22,13 +22,14 @@ Advanced CSS Interaction Logic:
 
 Image generation:
 - Each artifact must contain 1 to 5 images.
-- Format: `[IMG:GEN:{"style":"[STYLE]","prompt":"[DESC]","aspect_ratio":"[RATIO]","image_size":"[SIZE]"}]`
+- Format: `<img instruction='{"style":"[STYLE]","prompt":"[DESC]","aspect_ratio":"[RATIO]","image_size":"[SIZE]"}' src="[IMG:GEN]">`
 - [STYLE]: Use a known game engine, animation studio style, cinematic look, or real-world medium.
 - [DESC]: A detailed prompt of 100+ english words describing the image.
-- [RATIO]: Aspect ratio - "1:1" (square), "16:9" (landscape), "9:16" (portrait). Others available: "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9". Choose based on scene composition.
+- [RATIO]: Aspect ratio - "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9". Choose based on scene composition.
 - [SIZE]: Image resolution - "1K" (default), "2K", "4K" for higher quality.
 - Famous Characters: Use their names (e.g., Krul Tepes) and provide a detailed physical description.
 - Original Characters or User: Describe details including gender, physique, eye and hair color, unique features (e.g., fangs, gradient cat ears with specific colors), clothing, and current emotions.
-- Important: The extension will automatically replace the tag with a generated image. Place the tag inside img src attribute: `<img src="[IMG:GEN:{...}]">`
+- CRITICAL: The extension replaces `src="[IMG:GEN]"` with the actual image path. When you see `<img instruction='...' src="/path/to/image.jpg">` in history, that image is ALREADY GENERATED. For NEW images, ALWAYS use `src="[IMG:GEN]"`.
+- NEVER copy `src="/path/..."` from previous messages. ALWAYS write `src="[IMG:GEN]"` for new image generation.
 {{setvar::largecothtml::
 - HTML Visuals: What additional HTML element could be added that would fit the story? Is the new element varied and different from those used previously?}}

@@ -602,11 +602,61 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
 }
 
 /**
- * Parse [IMG:GEN:{json}] tags from message text
- * Handles nested braces in JSON properly
+ * Parse image generation tags from message text
+ * Supports two formats:
+ * 1. NEW: <img instruction='{"style":"...","prompt":"..."}' src="[IMG:GEN]">
+ * 2. LEGACY: [IMG:GEN:{"style":"...","prompt":"..."}]
  */
 function parseImageTags(text) {
     const tags = [];
+    
+    // === NEW FORMAT: <img instruction="{...}" src="[IMG:GEN]"> ===
+    // Match <img tags with instruction attribute and src containing [IMG:GEN] or empty
+    const imgTagRegex = /<img\s+[^>]*instruction\s*=\s*(['"])([\s\S]*?)\1[^>]*>/gi;
+    let imgMatch;
+    
+    while ((imgMatch = imgTagRegex.exec(text)) !== null) {
+        const fullImgTag = imgMatch[0];
+        const instructionJson = imgMatch[2];
+        
+        // Check if src needs generation (contains [IMG:GEN] or is empty)
+        const srcMatch = fullImgTag.match(/src\s*=\s*(['"])([\s\S]*?)\1/i);
+        const srcValue = srcMatch ? srcMatch[2] : '';
+        
+        // Skip if src is already a real path (generated image)
+        if (srcValue && !srcValue.includes('[IMG:GEN]') && !srcValue.includes('[IMG:') && srcValue.length > 5) {
+            iigLog('INFO', `Skipping already generated image: ${srcValue.substring(0, 50)}`);
+            continue;
+        }
+        
+        try {
+            // Normalize JSON: AI sometimes uses single quotes, HTML entities, etc.
+            let normalizedJson = instructionJson
+                .replace(/'/g, '"')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'")
+                .replace(/&amp;/g, '&');
+            
+            const data = JSON.parse(normalizedJson);
+            
+            tags.push({
+                fullMatch: fullImgTag,
+                index: imgMatch.index,
+                style: data.style || '',
+                prompt: data.prompt || '',
+                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
+                imageSize: data.image_size || data.imageSize || null,
+                quality: data.quality || null,
+                isNewFormat: true // Flag for replacement logic
+            });
+            
+            iigLog('INFO', `Found NEW format tag: ${data.prompt?.substring(0, 50)}`);
+        } catch (e) {
+            iigLog('WARN', `Failed to parse instruction JSON: ${instructionJson.substring(0, 100)}`, e.message);
+        }
+    }
+    
+    // === LEGACY FORMAT: [IMG:GEN:{...}] ===
     const marker = '[IMG:GEN:';
     let searchStart = 0;
     
@@ -654,47 +704,41 @@ function parseImageTags(text) {
         }
         
         if (jsonEnd === -1) {
-            // Malformed - no matching brace
             searchStart = jsonStart;
             continue;
         }
         
         const jsonStr = text.substring(jsonStart, jsonEnd);
         
-        // Check for closing bracket after JSON
         const afterJson = text.substring(jsonEnd);
         if (!afterJson.startsWith(']')) {
             searchStart = jsonEnd;
             continue;
         }
         
-        // The tag itself (without any wrapper)
-        const tagOnly = text.substring(markerIndex, jsonEnd + 1); // [IMG:GEN:{...}]
-        
-        // Check if tag is inside <img src="...">
-        const beforeMarker = text.substring(Math.max(0, markerIndex - 100), markerIndex);
-        const isInImgSrc = /<img[^>]*src=["']?$/i.test(beforeMarker);
+        const tagOnly = text.substring(markerIndex, jsonEnd + 1);
         
         try {
-            // Normalize JSON: AI sometimes uses single quotes instead of double quotes
             const normalizedJson = jsonStr.replace(/'/g, '"');
             const data = JSON.parse(normalizedJson);
             
             tags.push({
-                fullMatch: tagOnly, // Always just the tag itself
+                fullMatch: tagOnly,
                 index: markerIndex,
                 style: data.style || '',
                 prompt: data.prompt || '',
-                aspectRatio: data.aspect_ratio || data.aspectRatio || null, // "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
-                imageSize: data.image_size || data.imageSize || null, // "1K", "2K", "4K"
-                quality: data.quality || null, // e.g. "hd", "standard"
-                isInImgSrc: isInImgSrc // Flag for replacement logic
+                aspectRatio: data.aspect_ratio || data.aspectRatio || null,
+                imageSize: data.image_size || data.imageSize || null,
+                quality: data.quality || null,
+                isNewFormat: false
             });
+            
+            iigLog('INFO', `Found LEGACY format tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) {
-            console.warn('[IIG] Failed to parse tag JSON:', jsonStr, e);
+            iigLog('WARN', `Failed to parse legacy tag JSON: ${jsonStr.substring(0, 100)}`, e.message);
         }
         
-        searchStart = jsonEnd + 1; // Move past the closing ]
+        searchStart = jsonEnd + 1;
     }
     
     return tags;
@@ -911,15 +955,20 @@ async function processMessageTags(messageId) {
             loadingPlaceholder.replaceWith(img);
             
             // Update message.mes to persist the image
-            if (tag.isInImgSrc) {
-                // Tag was inside <img src="...">, just replace with URL
-                message.mes = message.mes.replace(tag.fullMatch, imagePath);
+            if (tag.isNewFormat) {
+                // NEW FORMAT: <img instruction="..." src="[IMG:GEN]">
+                // Just update the src attribute with the real path
+                // LLM sees same format but with real path = already generated
+                const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
+                message.mes = message.mes.replace(tag.fullMatch, updatedTag);
             } else {
-                // Tag was standalone, replace with markdown image
-                message.mes = message.mes.replace(tag.fullMatch, `![${tag.prompt}](${imagePath})`);
+                // LEGACY FORMAT: [IMG:GEN:{...}]
+                // Replace with completion marker so LLM doesn't copy it
+                const completionMarker = `[IMG:✓:${imagePath}]`;
+                message.mes = message.mes.replace(tag.fullMatch, completionMarker);
             }
             
-            console.log(`[IIG] Successfully generated image for tag ${index}`);
+            iigLog('INFO', `Successfully generated image for tag ${index}`);
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
             iigLog('ERROR', `Failed to generate image for tag ${index}:`, error.message);
@@ -929,9 +978,15 @@ async function processMessageTags(messageId) {
             loadingPlaceholder.replaceWith(errorPlaceholder);
             
             // IMPORTANT: Mark tag as failed in message.mes to prevent reprocessing on swipe
-            // Replace tag with error marker so it won't be picked up again
-            const errorMarker = `[IMG:ERROR:${error.message.substring(0, 50)}]`;
-            message.mes = message.mes.replace(tag.fullMatch, errorMarker);
+            if (tag.isNewFormat) {
+                // NEW FORMAT: update src with error marker
+                const errorTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="[IMG:ERROR]"`);
+                message.mes = message.mes.replace(tag.fullMatch, errorTag);
+            } else {
+                // LEGACY FORMAT: replace with error marker
+                const errorMarker = `[IMG:ERROR:${error.message.substring(0, 50)}]`;
+                message.mes = message.mes.replace(tag.fullMatch, errorMarker);
+            }
             iigLog('INFO', `Marked tag as failed in message.mes`);
             
             toastr.error(`Ошибка генерации: ${error.message}`, 'Генерация картинок');
