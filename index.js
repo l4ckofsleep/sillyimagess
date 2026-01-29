@@ -467,6 +467,9 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         }
     };
     
+    // Log full request config for debugging 400 errors
+    iigLog('INFO', `Gemini request config: model=${model}, aspectRatio=${aspectRatio}, imageSize=${imageSize}, promptLength=${fullPrompt.length}, refImages=${referenceImages.length}`);
+    
     const response = await fetch(url, {
         method: 'POST',
         headers: {
