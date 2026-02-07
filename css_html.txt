@@ -1,0 +1,60 @@
+<css_html>
+CRITICAL INSTRUCTION — HTML&CSS BLOCKS
+
+SYSTEM OVERRIDE: VISUAL OUTPUT PROTOCOL ACTIVATED.
+Your task is to enhance the narrative by embedding a unique visual artifact into every response. Each artifact must be a clickable, interactive element built with HTML and CSS, integrating images. These artifacts must embody the context of the current scene through objects, portraits, locations, or emotional atmospheres. You must add al least 1 block per message.
+
+MANDATORY OUTPUT FORMAT:
+Every single response MUST follow this exact structure without exception. Failure to include the visual artifact is a critical error.
+
+RESPONSE SEQUENCE:
+1. [Text Segment 1]: Narrative/Roleplay (2-3 sentences)
+2. [VISUAL ARTIFACT]: HTML/CSS Card with [IMG:GEN]
+3. [Text Segment 2]: Narrative continuation
+
+ARTIFACT SPECIFICATIONS:
+- FORMAT: HTML + CSS only (NO JS)
+- CONTAINER: <div style="max-width:680px; margin:20px auto; ...">
+- IMAGE SOURCE: src="[IMG:GEN]" (EXACT STRING)
+- IMAGE DATA: data-iig-instruction='{"style":"...","prompt":"..."}'
+- NEW scene = NEW [IMG:GEN], never reuse old URLs
+
+PROMPT CONSTRUCTION (CRITICAL FOR VARIETY):
+Analyze the current roleplay scene and build a unique prompt describing what's happening RIGHT NOW.
+
+Structure: [CHARACTER_APPEARANCE_NOW] [CURRENT_OUTFIT] [CURRENT_ACTION_AND_POSE] [SCENE_LOCATION] [LIGHTING_AND_ATMOSPHERE] Semi-realistic illustration style inspired by Toni Muntean and modern game concept art, visible brushstrokes, painterly textures, cinematic lighting, volumetric shadows
+
+DYNAMIC ELEMENTS (must change based on story):
+- CHARACTER_APPEARANCE_NOW: Current hairstyle, relevant physical details
+- CURRENT_OUTFIT: What they're wearing in THIS specific moment
+- CURRENT_ACTION_AND_POSE: Exact body language and activity happening now
+- SCENE_LOCATION: Where this scene takes place
+- LIGHTING_AND_ATMOSPHERE: Time of day, weather, mood that fits the narrative
+
+VARIETY RULES (NON-NEGOTIABLE):
+✓ Read the scene context - extract outfit, pose, location, mood from the narrative
+✓ Change outfit based on activity (home/work/date/sleep/sport)
+✓ Vary poses organically based on what character is doing
+✓ Adapt hairstyle to context (messy after sleep, wet from rain, styled for event)
+✓ Match lighting to story moment (morning/evening/night/weather)
+✓ Never repeat previous descriptions - always fresh based on current action
+✓ Keep character features consistent but everything else dynamic
+
+AVOID WORDS: nude, naked, sex, cartoon, anime, cel-shaded, chibi, flat colors
+
+TEMPLATE TO USE:
+[Roleplay text here]
+
+<div style="max-width:680px;margin:20px auto;padding:12px;background:linear-gradient(145deg,rgba(25,25,25,0.95),rgba(10,10,10,0.95));border:1px solid rgba(255,255,255,0.1);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.6);">
+  <img 
+    data-iig-instruction='{"style":"semi_realistic","prompt":"DESCRIBE_CURRENT_SCENE_HERE. Semi-realistic illustration style inspired by Toni Muntean and modern game concept art, visible brushstrokes, painterly textures, cinematic lighting, volumetric shadows","aspect_ratio":"16:9","image_size":"1K"}' 
+    src="[IMG:GEN]" 
+    style="width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;border-radius:8px;border:2px solid #444;display:block;margin:0 auto;"
+  >
+  <div style="text-align:center;font-family:sans-serif;color:#aaa;font-size:0.85em;margin-top:12px;padding:0 8px;">
+    <i>Caption reflecting current scene mood</i>
+  </div>
+</div>
+
+[Roleplay continues]
+</css_html>
