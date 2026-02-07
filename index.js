@@ -47,7 +47,7 @@ function exportLogs() {
 // Default settings
 const defaultSettings = Object.freeze({
     enabled: true,
-    apiType: 'openai', // 'openai' or 'gemini'
+    apiType: 'gemini', // Changed default to gemini as per your use case
     endpoint: '',
     apiKey: '',
     model: '',
@@ -149,10 +149,13 @@ async function fetchModels() {
         return [];
     }
     
-    // MODIFIED: Use URL exactly as is (no /v1/models appended)
-    // NOTE: If you put a generation URL here, fetching models will fail. 
-    // To fetch models, you must temporarily enter the models URL.
-    const url = settings.endpoint;
+    // UPDATED: Use endpoint exactly as provided, no auto-append
+    // You might need to add /v1/models to your URL manually if fetching models fails
+    // or we can try to guess. Let's try to be smart:
+    let url = settings.endpoint;
+    if (!url.endsWith('/models')) {
+         url = `${settings.endpoint.replace(/\/$/, '')}/v1/models`;
+    }
     
     try {
         const response = await fetch(url, {
@@ -173,7 +176,7 @@ async function fetchModels() {
         return models.filter(m => isImageModel(m.id)).map(m => m.id);
     } catch (error) {
         console.error('[IIG] Failed to fetch models:', error);
-        toastr.error(`Ошибка загрузки моделей (проверьте URL): ${error.message}`, 'Генерация картинок');
+        toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'Генерация картинок');
         return [];
     }
 }
@@ -340,8 +343,12 @@ async function getUserAvatarBase64() {
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     
-    // MODIFIED: Use URL exactly as entered in settings
-    const url = settings.endpoint;
+    // UPDATED: Use URL exactly as is, if it contains /generations, otherwise append
+    let url = settings.endpoint;
+    if (!url.includes('/images/generations')) {
+        // Only append if it looks like a base URL
+        url = `${settings.endpoint.replace(/\/$/, '')}/v1/images/generations`;
+    }
     
     // Combine style and prompt
     const fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
@@ -413,7 +420,9 @@ const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const model = settings.model;
-    const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent`;
+    
+    // UPDATED: Added ?key=... to the URL to fix 401 Unauthorized errors
+    const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
     
     // Determine aspect ratio: tag option > settings, with validation
     let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
@@ -1427,16 +1436,16 @@ function createSettingsUI() {
                     <div class="flex-row">
                         <label for="iig_api_type">Тип API</label>
                         <select id="iig_api_type" class="flex1">
-                            <option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>Прямой URL (OpenAI формат)</option>
+                            <option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-совместимый (вручную)</option>
                             <option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-совместимый (nano-banana)</option>
                         </select>
                     </div>
                     
                     <div class="flex-row">
-                        <label for="iig_endpoint">Полный URL</label>
+                        <label for="iig_endpoint">URL эндпоинта</label>
                         <input type="text" id="iig_endpoint" class="text_pole flex1" 
                                value="${settings.endpoint}" 
-                               placeholder="Например: http://localhost:8045/v1/images/generations">
+                               placeholder="http://localhost:8045">
                     </div>
                     
                     <div class="flex-row">
