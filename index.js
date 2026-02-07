@@ -145,7 +145,6 @@
             return [];
         }
         
-        // Try to guess URL if user didn't provide full path
         let url = settings.endpoint;
         if (!url.endsWith('/models') && !url.includes('generateContent')) {
             url = `${settings.endpoint.replace(/\/$/, '')}/v1/models`;
@@ -206,7 +205,6 @@
                 const reader = new FileReader();
                 reader.onloadend = () => {
                     const result = reader.result;
-                    // Handle both data URL and raw binary
                     const base64 = result.includes(',') ? result.split(',')[1] : result;
                     resolve(base64);
                 };
@@ -214,7 +212,7 @@
                 reader.readAsDataURL(blob);
             });
         } catch (error) {
-            console.error('[IIG] Failed to convert image to base64:', error);
+            iigLog('WARN', `Failed to convert image to base64 (CORS?): ${error.message}`);
             return null;
         }
     }
@@ -225,9 +223,7 @@
     async function saveImageToFile(dataUrl) {
         const context = SillyTavern.getContext();
         
-        // Ensure dataUrl has the prefix
         if (!dataUrl.startsWith('data:image')) {
-            // Assume jpeg if missing
              dataUrl = `data:image/jpeg;base64,${dataUrl}`;
         }
 
@@ -382,20 +378,19 @@
         }
         
         const result = await response.json();
-        
         const dataList = result.data || [];
-        if (dataList.length === 0) {
-            if (result.url) return result.url;
-            throw new Error('No image data in response');
+        
+        if (dataList.length > 0) {
+            const imageObj = dataList[0];
+            if (imageObj.b64_json) {
+                return `data:image/png;base64,${imageObj.b64_json}`;
+            }
+            return imageObj.url;
         }
         
-        const imageObj = dataList[0];
+        if (result.url) return result.url;
         
-        if (imageObj.b64_json) {
-            return `data:image/png;base64,${imageObj.b64_json}`;
-        }
-        
-        return imageObj.url;
+        throw new Error('No image data in response');
     }
 
     /**
@@ -476,12 +471,12 @@
             if (result.promptFeedback && result.promptFeedback.blockReason) {
                 throw new Error(`Блокировка промпта (Safety): ${result.promptFeedback.blockReason}`);
             }
-            throw new Error('Пустой ответ от модели (возможно, жесткий Safety Filter).');
+            throw new Error('Пустой ответ от модели.');
         }
 
         const responseParts = candidates[0].content?.parts || [];
         
-        // 1. Ищем картинку в inlineData
+        // 1. Ищем картинку в inlineData (base64)
         for (const part of responseParts) {
             if (part.inlineData) {
                 return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
@@ -491,25 +486,33 @@
             }
         }
 
-        // 2. Ищем ССЫЛКУ на картинку в тексте (Вот это фикс для твоего случая!)
+        // 2. Ищем ССЫЛКУ на картинку в тексте (ФИКС ДЛЯ ANTIGRAVITY)
         const textPart = responseParts.find(p => p.text);
         if (textPart) {
             const text = textPart.text;
-            // Ищем markdown ссылку типа ![image](http...) или просто http...
             const imgMatch = text.match(/!\[.*?\]\((.*?)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
             
             if (imgMatch) {
                 const imgUrl = imgMatch[1];
-                iigLog('INFO', `Found image URL in text response: ${imgUrl}`);
+                iigLog('INFO', `Found image URL: ${imgUrl}`);
                 
-                // Скачиваем картинку по ссылке и конвертируем в base64
+                // Пытаемся скачать
                 const base64 = await imageUrlToBase64(imgUrl);
                 if (base64) {
                      return `data:image/jpeg;base64,${base64}`;
+                } else {
+                     // Если скачать не вышло, возвращаем URL как есть
+                     iigLog('WARN', 'Returning remote URL directly');
+                     return imgUrl;
                 }
             }
             
-            throw new Error(`Модель ответила текстом: "${text.substring(0, 100)}..."`);
+            // Если ссылки нет, значит отказ
+            const finishReason = candidates[0].finishReason;
+            if (finishReason && finishReason !== 'STOP') {
+                 throw new Error(`Отказ генерации (${finishReason}): "${text.substring(0, 100)}..."`);
+            }
+            throw new Error(`Модель ответила текстом без картинки: "${text.substring(0, 100)}..."`);
         }
         
         throw new Error('В ответе нет ни картинки, ни текста.');
@@ -882,8 +885,15 @@
                     { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
                 );
                 
-                statusEl.textContent = 'Сохранение...';
-                const imagePath = await saveImageToFile(dataUrl);
+                let imagePath;
+                if (dataUrl.startsWith('http')) {
+                    // ФИКС: Используем удаленный URL напрямую
+                    imagePath = dataUrl;
+                } else {
+                    // Используем base64
+                    statusEl.textContent = 'Сохранение...';
+                    imagePath = await saveImageToFile(dataUrl);
+                }
                 
                 const img = document.createElement('img');
                 img.className = 'iig-generated-image';
@@ -978,8 +988,13 @@
                         { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
                     );
                     
-                    statusEl.textContent = 'Сохранение...';
-                    const imagePath = await saveImageToFile(dataUrl);
+                    let imagePath;
+                    if (dataUrl.startsWith('http')) {
+                        imagePath = dataUrl;
+                    } else {
+                        statusEl.textContent = 'Сохранение...';
+                        imagePath = await saveImageToFile(dataUrl);
+                    }
                     
                     const img = document.createElement('img');
                     img.className = 'iig-generated-image';
