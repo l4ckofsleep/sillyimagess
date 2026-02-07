@@ -421,24 +421,20 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const settings = getSettings();
     const model = settings.model;
     
-    // UPDATED: Added ?key=... to the URL to fix 401 Unauthorized errors
+    // Формируем URL с ключом
     const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
     
-    // Determine aspect ratio: tag option > settings, with validation
+    // Determine aspect ratio
     let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) {
-        iigLog('WARN', `Invalid aspect_ratio "${aspectRatio}", falling back to settings or default`);
         aspectRatio = VALID_ASPECT_RATIOS.includes(settings.aspectRatio) ? settings.aspectRatio : '1:1';
     }
     
-    // Determine image size: tag option > settings, with validation
+    // Determine image size
     let imageSize = options.imageSize || settings.imageSize || '1K';
     if (!VALID_IMAGE_SIZES.includes(imageSize)) {
-        iigLog('WARN', `Invalid image_size "${imageSize}", falling back to settings or default`);
         imageSize = VALID_IMAGE_SIZES.includes(settings.imageSize) ? settings.imageSize : '1K';
     }
-    
-    iigLog('INFO', `Using aspect ratio: ${aspectRatio}, image size: ${imageSize}`);
     
     // Build parts array
     const parts = [];
@@ -453,18 +449,15 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         });
     }
     
-    // Add prompt with style and reference instruction
+    // Add prompt
     let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
     
-    // If reference images provided, add instruction to copy appearance
     if (referenceImages.length > 0) {
-        const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). You MUST precisely copy their: face structure, eye color, hair color and style, skin tone, body type, clothing, and all distinctive features. Do not deviate from the reference appearances.]`;
+        const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). Copy their visual features precisely.]`;
         fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
     }
     
     parts.push({ text: fullPrompt });
-    
-    console.log(`[IIG] Gemini request: ${referenceImages.length} reference image(s) + prompt (${fullPrompt.length} chars)`);
     
     const body = {
         contents: [{
@@ -480,13 +473,11 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         }
     };
     
-    // Log full request config for debugging 400 errors
-    iigLog('INFO', `Gemini request config: model=${model}, aspectRatio=${aspectRatio}, imageSize=${imageSize}, promptLength=${fullPrompt.length}, refImages=${referenceImages.length}`);
+    iigLog('INFO', `Gemini request: model=${model}, refs=${referenceImages.length}`);
     
     const response = await fetch(url, {
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${settings.apiKey}`,
             'Content-Type': 'application/json'
         },
         body: JSON.stringify(body)
@@ -499,16 +490,29 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     
     const result = await response.json();
     
-    // Parse Gemini response
+    // === ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ ===
+    console.log('[IIG] Gemini Raw Response:', result);
+    
     const candidates = result.candidates || [];
     if (candidates.length === 0) {
-        throw new Error('No candidates in response');
+        // Проверяем, не вернул ли сервер ошибку в другом формате
+        if (result.error) throw new Error(`Gemini API Error: ${result.error.message}`);
+        throw new Error('No candidates in response (пустой ответ от модели)');
     }
     
+    // Проверяем причины остановки (Цензура и т.д.)
+    const finishReason = candidates[0].finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+        iigLog('WARN', `Gemini finishReason: ${finishReason}`);
+        // Если это SAFETY, значит сработал фильтр
+        if (finishReason === 'SAFETY' || finishReason === 'BLOCK_ONLY_HIGH' || finishReason === 'RECITATION') {
+             throw new Error(`Модель отказала в генерации. Причина: ${finishReason} (Попробуйте отключить аватарки-референсы или упростить промпт)`);
+        }
+    }
+
     const responseParts = candidates[0].content?.parts || [];
     
     for (const part of responseParts) {
-        // Check both camelCase and snake_case variants
         if (part.inlineData) {
             return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
         }
@@ -517,127 +521,13 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
         }
     }
     
-    throw new Error('No image found in Gemini response');
-}
-
-/**
- * Validate settings before generation
- */
-function validateSettings() {
-    const settings = getSettings();
-    const errors = [];
-    
-    if (!settings.endpoint) {
-        errors.push('URL эндпоинта не настроен');
-    }
-    if (!settings.apiKey) {
-        errors.push('API ключ не настроен');
-    }
-    if (!settings.model) {
-        errors.push('Модель не выбрана');
+    // Если картинки нет, но есть текст (отказ модели)
+    const textPart = responseParts.find(p => p.text);
+    if (textPart) {
+        throw new Error(`Модель ответила текстом вместо картинки: "${textPart.text.substring(0, 100)}..."`);
     }
     
-    if (errors.length > 0) {
-        throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
-    }
-}
-
-/**
- * Sanitize text for safe HTML display
- */
-function sanitizeForHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-/**
- * Generate image with retry logic
- * @param {string} prompt - Image description
- * @param {string} style - Style tag
- * @param {function} onStatusUpdate - Status callback
- * @param {object} options - Additional options (aspectRatio, quality)
- */
-async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
-    // Validate settings first
-    validateSettings();
-    
-    const settings = getSettings();
-    const maxRetries = settings.maxRetries;
-    const baseDelay = settings.retryDelay;
-    
-    // Collect reference images if enabled (for Gemini/nano-banana)
-    const referenceImages = [];
-    
-    if (settings.apiType === 'gemini' || isGeminiModel(settings.model)) {
-        if (settings.sendCharAvatar) {
-            console.log('[IIG] Fetching character avatar for reference...');
-            const charAvatar = await getCharacterAvatarBase64();
-            if (charAvatar) {
-                referenceImages.push(charAvatar);
-                console.log('[IIG] Character avatar added to references');
-            }
-        }
-        
-        if (settings.sendUserAvatar) {
-            console.log('[IIG] Fetching user avatar for reference...');
-            const userAvatar = await getUserAvatarBase64();
-            if (userAvatar) {
-                referenceImages.push(userAvatar);
-                console.log('[IIG] User avatar added to references');
-            }
-        }
-        
-        console.log(`[IIG] Total reference images: ${referenceImages.length}`);
-    }
-    
-    let lastError;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            onStatusUpdate?.(`Генерация${attempt > 0 ? ` (повтор ${attempt}/${maxRetries})` : ''}...`);
-            
-            // Choose API based on type or model
-            if (settings.apiType === 'gemini' || isGeminiModel(settings.model)) {
-                return await generateImageGemini(prompt, style, referenceImages, options);
-            } else {
-                return await generateImageOpenAI(prompt, style, referenceImages, options);
-            }
-        } catch (error) {
-            lastError = error;
-            console.error(`[IIG] Generation attempt ${attempt + 1} failed:`, error);
-            
-            // Check if retryable
-            const isRetryable = error.message?.includes('429') ||
-                               error.message?.includes('503') ||
-                               error.message?.includes('502') ||
-                               error.message?.includes('504') ||
-                               error.message?.includes('timeout') ||
-                               error.message?.includes('network');
-            
-            if (!isRetryable || attempt === maxRetries) {
-                break;
-            }
-            
-            const delay = baseDelay * Math.pow(2, attempt);
-            onStatusUpdate?.(`Повтор через ${delay / 1000}с...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-    
-    throw lastError;
-}
-
-/**
- * Check if a file exists on the server
- */
-async function checkFileExists(path) {
-    try {
-        const response = await fetch(path, { method: 'HEAD' });
-        return response.ok;
-    } catch (e) {
-        return false;
-    }
+    throw new Error(`Картинка не найдена (Status: ${finishReason || 'Unknown'})`);
 }
 
 /**
