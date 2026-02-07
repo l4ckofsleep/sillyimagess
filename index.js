@@ -147,7 +147,7 @@
         
         // Try to guess URL if user didn't provide full path
         let url = settings.endpoint;
-        if (!url.endsWith('/models')) {
+        if (!url.endsWith('/models') && !url.includes('generateContent')) {
             url = `${settings.endpoint.replace(/\/$/, '')}/v1/models`;
         }
         
@@ -160,7 +160,7 @@
             });
             
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+                return [];
             }
             
             const data = await response.json();
@@ -168,8 +168,6 @@
             
             return models.filter(m => isImageModel(m.id)).map(m => m.id);
         } catch (error) {
-            console.error('[IIG] Failed to fetch models:', error);
-            toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'Генерация картинок');
             return [];
         }
     }
@@ -378,7 +376,7 @@
         return imageData;
     }
 
-/**
+    /**
      * Generate image via Gemini-compatible endpoint (nano-banana)
      */
     async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
@@ -489,14 +487,29 @@
             }
         }
 
-        // 3. Ищем ТЕКСТ (Объяснение отказа) - Самое важное улучшение!
+        // 3. Ищем ТЕКСТ (Объяснение отказа)
         const textPart = responseParts.find(p => p.text);
         if (textPart) {
-            // Часто модель пишет "I cannot generate images of..."
             throw new Error(`Модель отказалась рисовать и ответила текстом: "${textPart.text.substring(0, 200)}..."`);
         }
         
         throw new Error('В ответе нет ни картинки, ни текста ошибки.');
+    }
+
+    /**
+     * Validate settings before generation
+     */
+    function validateSettings() {
+        const settings = getSettings();
+        const errors = [];
+        
+        if (!settings.endpoint) errors.push('URL эндпоинта не настроен');
+        if (!settings.apiKey) errors.push('API ключ не настроен');
+        if (!settings.model) errors.push('Модель не выбрана');
+        
+        if (errors.length > 0) {
+            throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
+        }
     }
 
     /**
