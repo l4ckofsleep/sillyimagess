@@ -205,7 +205,9 @@
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onloadend = () => {
-                    const base64 = reader.result.split(',')[1];
+                    const result = reader.result;
+                    // Handle both data URL and raw binary
+                    const base64 = result.includes(',') ? result.split(',')[1] : result;
                     resolve(base64);
                 };
                 reader.onerror = reject;
@@ -223,6 +225,12 @@
     async function saveImageToFile(dataUrl) {
         const context = SillyTavern.getContext();
         
+        // Ensure dataUrl has the prefix
+        if (!dataUrl.startsWith('data:image')) {
+            // Assume jpeg if missing
+             dataUrl = `data:image/jpeg;base64,${dataUrl}`;
+        }
+
         const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
         if (!match) {
             throw new Error('Invalid data URL format');
@@ -311,12 +319,27 @@
     }
 
     /**
+     * Validate settings before generation
+     */
+    function validateSettings() {
+        const settings = getSettings();
+        const errors = [];
+        
+        if (!settings.endpoint) errors.push('URL эндпоинта не настроен');
+        if (!settings.apiKey) errors.push('API ключ не настроен');
+        if (!settings.model) errors.push('Модель не выбрана');
+        
+        if (errors.length > 0) {
+            throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
+        }
+    }
+
+    /**
      * Generate image via OpenAI-compatible endpoint
      */
     async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
         const settings = getSettings();
         
-        // Manual URL logic
         let url = settings.endpoint;
         if (!url.includes('/images/generations')) {
             url = `${settings.endpoint.replace(/\/$/, '')}/v1/images/generations`;
@@ -367,13 +390,12 @@
         }
         
         const imageObj = dataList[0];
-        const imageData = imageObj.b64_json || imageObj.url;
         
         if (imageObj.b64_json) {
             return `data:image/png;base64,${imageObj.b64_json}`;
         }
         
-        return imageData;
+        return imageObj.url;
     }
 
     /**
@@ -383,7 +405,6 @@
         const settings = getSettings();
         const model = settings.model;
         
-        // Добавляем ключ в URL
         const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
         
         let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
@@ -400,12 +421,6 @@
         
         const parts = [];
         
-        // ВАЖНО: Даже если настройки включены, этот код ниже
-        // позволяет временно принудительно отключить референсы для теста,
-        // если раскомментировать следующую строку:
-        // referenceImages = []; 
-
-        // Добавляем референсы (если они есть)
         for (const imgB64 of referenceImages.slice(0, 4)) {
             parts.push({
                 inlineData: {
@@ -417,7 +432,6 @@
         
         let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
         
-        // Если есть референсы, добавляем инструкцию
         if (referenceImages.length > 0) {
             const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). Copy their visual features precisely.]`;
             fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
@@ -455,7 +469,6 @@
         }
         
         const result = await response.json();
-        // Пишем полный ответ в консоль браузера (F12)
         console.log('[IIG] Gemini Raw Response:', result);
         
         const candidates = result.candidates || [];
@@ -466,18 +479,9 @@
             throw new Error('Пустой ответ от модели (возможно, жесткий Safety Filter).');
         }
 
-        // 1. Проверяем Finish Reason
-        const finishReason = candidates[0].finishReason;
-        if (finishReason && finishReason !== 'STOP') {
-             iigLog('WARN', `Gemini finishReason: ${finishReason}`);
-             if (finishReason === 'SAFETY' || finishReason === 'BLOCK_ONLY_HIGH' || finishReason === 'RECITATION') {
-                 throw new Error(`Отказ генерации (фильтр безопасности: ${finishReason}).`);
-             }
-        }
-        
         const responseParts = candidates[0].content?.parts || [];
         
-        // 2. Ищем картинку
+        // 1. Ищем картинку в inlineData
         for (const part of responseParts) {
             if (part.inlineData) {
                 return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
@@ -487,29 +491,28 @@
             }
         }
 
-        // 3. Ищем ТЕКСТ (Объяснение отказа)
+        // 2. Ищем ССЫЛКУ на картинку в тексте (Вот это фикс для твоего случая!)
         const textPart = responseParts.find(p => p.text);
         if (textPart) {
-            throw new Error(`Модель отказалась рисовать и ответила текстом: "${textPart.text.substring(0, 200)}..."`);
+            const text = textPart.text;
+            // Ищем markdown ссылку типа ![image](http...) или просто http...
+            const imgMatch = text.match(/!\[.*?\]\((.*?)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+            
+            if (imgMatch) {
+                const imgUrl = imgMatch[1];
+                iigLog('INFO', `Found image URL in text response: ${imgUrl}`);
+                
+                // Скачиваем картинку по ссылке и конвертируем в base64
+                const base64 = await imageUrlToBase64(imgUrl);
+                if (base64) {
+                     return `data:image/jpeg;base64,${base64}`;
+                }
+            }
+            
+            throw new Error(`Модель ответила текстом: "${text.substring(0, 100)}..."`);
         }
         
-        throw new Error('В ответе нет ни картинки, ни текста ошибки.');
-    }
-
-    /**
-     * Validate settings before generation
-     */
-    function validateSettings() {
-        const settings = getSettings();
-        const errors = [];
-        
-        if (!settings.endpoint) errors.push('URL эндпоинта не настроен');
-        if (!settings.apiKey) errors.push('API ключ не настроен');
-        if (!settings.model) errors.push('Модель не выбрана');
-        
-        if (errors.length > 0) {
-            throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
-        }
+        throw new Error('В ответе нет ни картинки, ни текста.');
     }
 
     /**
