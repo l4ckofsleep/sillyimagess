@@ -84,7 +84,6 @@ const VIDEO_MODEL_KEYWORDS = [
  * Check if model ID is an image generation model
  */
 function isImageModel(modelId) {
-    if (!modelId) return false;
     const mid = modelId.toLowerCase();
     
     // Exclude video models
@@ -107,7 +106,6 @@ function isImageModel(modelId) {
  * Check if model is Gemini/nano-banana type
  */
 function isGeminiModel(modelId) {
-    if (!modelId) return false;
     const mid = modelId.toLowerCase();
     return mid.includes('nano-banana');
 }
@@ -141,11 +139,43 @@ function saveSettings() {
 }
 
 /**
- * Fetch models list from endpoint (Legacy, kept for compatibility if needed)
+ * Fetch models list from endpoint
  */
 async function fetchModels() {
-    // Эта функция больше не используется для UI, но оставим её, чтобы не ломать логику, если она вызывается где-то еще
-    return [];
+    const settings = getSettings();
+    
+    if (!settings.endpoint || !settings.apiKey) {
+        console.warn('[IIG] Cannot fetch models: endpoint or API key not set');
+        return [];
+    }
+    
+    // MODIFIED: Use URL exactly as is (no /v1/models appended)
+    // NOTE: If you put a generation URL here, fetching models will fail. 
+    // To fetch models, you must temporarily enter the models URL.
+    const url = settings.endpoint;
+    
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${settings.apiKey}`
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const models = data.data || [];
+        
+        // Filter for image models only
+        return models.filter(m => isImageModel(m.id)).map(m => m.id);
+    } catch (error) {
+        console.error('[IIG] Failed to fetch models:', error);
+        toastr.error(`Ошибка загрузки моделей (проверьте URL): ${error.message}`, 'Генерация картинок');
+        return [];
+    }
 }
 
 /**
@@ -309,7 +339,9 @@ async function getUserAvatarBase64() {
  */
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
-    const url = `${settings.endpoint.replace(/\/$/, '')}/v1/images/generations`;
+    
+    // MODIFIED: Use URL exactly as entered in settings
+    const url = settings.endpoint;
     
     // Combine style and prompt
     const fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
@@ -512,6 +544,10 @@ function sanitizeForHtml(text) {
 
 /**
  * Generate image with retry logic
+ * @param {string} prompt - Image description
+ * @param {string} style - Style tag
+ * @param {function} onStatusUpdate - Status callback
+ * @param {object} options - Additional options (aspectRatio, quality)
  */
 async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {}) {
     // Validate settings first
@@ -597,12 +633,20 @@ async function checkFileExists(path) {
 
 /**
  * Parse image generation tags from message text
+ * Supports two formats:
+ * 1. NEW: <img data-iig-instruction='{"style":"...","prompt":"..."}' src="[IMG:GEN]">
+ * 2. LEGACY: [IMG:GEN:{"style":"...","prompt":"..."}]
+ * * @param {string} text - Message text
+ * @param {object} options - Options
+ * @param {boolean} options.checkExistence - Check if image files exist (for hallucination detection)
+ * @param {boolean} options.forceAll - Include all instruction tags even with valid paths (for regeneration)
  */
 async function parseImageTags(text, options = {}) {
     const { checkExistence = false, forceAll = false } = options;
     const tags = [];
     
     // === NEW FORMAT: <img data-iig-instruction="{...}" src="[IMG:GEN]"> ===
+    // LLM often generates broken HTML with unescaped quotes, so we parse manually
     const imgTagMarker = 'data-iig-instruction=';
     let searchPos = 0;
     
@@ -610,12 +654,14 @@ async function parseImageTags(text, options = {}) {
         const markerPos = text.indexOf(imgTagMarker, searchPos);
         if (markerPos === -1) break;
         
+        // Find the start of the <img tag
         let imgStart = text.lastIndexOf('<img', markerPos);
         if (imgStart === -1 || markerPos - imgStart > 500) {
             searchPos = markerPos + 1;
             continue;
         }
         
+        // Find the JSON start (first { after the marker)
         const afterMarker = markerPos + imgTagMarker.length;
         let jsonStart = text.indexOf('{', afterMarker);
         if (jsonStart === -1 || jsonStart > afterMarker + 10) {
@@ -623,6 +669,7 @@ async function parseImageTags(text, options = {}) {
             continue;
         }
         
+        // Find matching closing brace using brace counting
         let braceCount = 0;
         let jsonEnd = -1;
         let inString = false;
@@ -635,14 +682,17 @@ async function parseImageTags(text, options = {}) {
                 escapeNext = false;
                 continue;
             }
+            
             if (char === '\\' && inString) {
                 escapeNext = true;
                 continue;
             }
+            
             if (char === '"') {
                 inString = !inString;
                 continue;
             }
+            
             if (!inString) {
                 if (char === '{') {
                     braceCount++;
@@ -661,39 +711,54 @@ async function parseImageTags(text, options = {}) {
             continue;
         }
         
+        // Find the end of the <img> tag
         let imgEnd = text.indexOf('>', jsonEnd);
         if (imgEnd === -1) {
             searchPos = markerPos + 1;
             continue;
         }
-        imgEnd++;
+        imgEnd++; // Include the >
         
         const fullImgTag = text.substring(imgStart, imgEnd);
         const instructionJson = text.substring(jsonStart, jsonEnd);
         
+        // Check if src needs generation
         const srcMatch = fullImgTag.match(/src\s*=\s*["']?([^"'\s>]+)/i);
         const srcValue = srcMatch ? srcMatch[1] : '';
         
+        // Determine if this needs generation
         let needsGeneration = false;
         const hasMarker = srcValue.includes('[IMG:GEN]') || srcValue.includes('[IMG:');
-        const hasErrorImage = srcValue.includes('error.svg');
+        const hasErrorImage = srcValue.includes('error.svg'); // Our error placeholder - NO auto-retry
         const hasPath = srcValue && srcValue.startsWith('/') && srcValue.length > 5;
         
+        // Skip error images - user must click to retry manually (prevents conflict on swipe)
         if (hasErrorImage && !forceAll) {
+            iigLog('INFO', `Skipping error image (click to retry): ${srcValue.substring(0, 50)}`);
             searchPos = imgEnd;
             continue;
         }
         
         if (forceAll) {
+            // Regeneration mode: include all tags with instruction (user-triggered)
             needsGeneration = true;
+            iigLog('INFO', `Force regeneration mode: including ${srcValue.substring(0, 30)}`);
         } else if (hasMarker || !srcValue) {
+            // Explicit marker or empty src = needs generation
             needsGeneration = true;
         } else if (hasPath && checkExistence) {
+            // Has a path - check if file actually exists
             const exists = await checkFileExists(srcValue);
             if (!exists) {
+                // File doesn't exist = LLM hallucinated the path
+                iigLog('WARN', `File does not exist (LLM hallucination?): ${srcValue}`);
                 needsGeneration = true;
+            } else {
+                iigLog('INFO', `Skipping existing image: ${srcValue.substring(0, 50)}`);
             }
         } else if (hasPath) {
+            // Has path but not checking existence - skip
+            iigLog('INFO', `Skipping path (no existence check): ${srcValue.substring(0, 50)}`);
             searchPos = imgEnd;
             continue;
         }
@@ -704,6 +769,7 @@ async function parseImageTags(text, options = {}) {
         }
         
         try {
+            // Normalize JSON: AI sometimes uses single quotes, HTML entities, etc.
             let normalizedJson = instructionJson
                 .replace(/&quot;/g, '"')
                 .replace(/&apos;/g, "'")
@@ -722,10 +788,12 @@ async function parseImageTags(text, options = {}) {
                 imageSize: data.image_size || data.imageSize || null,
                 quality: data.quality || null,
                 isNewFormat: true,
-                existingSrc: hasPath ? srcValue : null
+                existingSrc: hasPath ? srcValue : null // Store existing src for logging
             });
+            
+            iigLog('INFO', `Found NEW format tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) {
-            iigLog('WARN', `Failed to parse instruction JSON: ${e.message}`);
+            iigLog('WARN', `Failed to parse instruction JSON: ${instructionJson.substring(0, 100)}`, e.message);
         }
         
         searchPos = imgEnd;
@@ -741,6 +809,7 @@ async function parseImageTags(text, options = {}) {
         
         const jsonStart = markerIndex + marker.length;
         
+        // Find the matching closing brace for JSON
         let braceCount = 0;
         let jsonEnd = -1;
         let inString = false;
@@ -753,14 +822,17 @@ async function parseImageTags(text, options = {}) {
                 escapeNext = false;
                 continue;
             }
+            
             if (char === '\\' && inString) {
                 escapeNext = true;
                 continue;
             }
+            
             if (char === '"') {
                 inString = !inString;
                 continue;
             }
+            
             if (!inString) {
                 if (char === '{') {
                     braceCount++;
@@ -780,6 +852,7 @@ async function parseImageTags(text, options = {}) {
         }
         
         const jsonStr = text.substring(jsonStart, jsonEnd);
+        
         const afterJson = text.substring(jsonEnd);
         if (!afterJson.startsWith(']')) {
             searchStart = jsonEnd;
@@ -802,8 +875,10 @@ async function parseImageTags(text, options = {}) {
                 quality: data.quality || null,
                 isNewFormat: false
             });
+            
+            iigLog('INFO', `Found LEGACY format tag: ${data.prompt?.substring(0, 50)}`);
         } catch (e) {
-            iigLog('WARN', `Failed to parse legacy tag JSON: ${e.message}`);
+            iigLog('WARN', `Failed to parse legacy tag JSON: ${jsonStr.substring(0, 100)}`, e.message);
         }
         
         searchStart = jsonEnd + 1;
@@ -830,7 +905,8 @@ function createLoadingPlaceholder(tagId) {
 const ERROR_IMAGE_PATH = '/scripts/extensions/third-party/sillyimages/error.svg';
 
 /**
- * Create error placeholder element
+ * Create error placeholder element - just shows error.svg, no click handlers
+ * User uses the regenerate button in message menu to retry
  */
 function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     const img = document.createElement('img');
@@ -840,6 +916,7 @@ function createErrorPlaceholder(tagId, errorMessage, tagInfo) {
     img.title = `Ошибка: ${errorMessage}`;
     img.dataset.tagId = tagId;
     
+    // Preserve data-iig-instruction for regenerate button functionality
     if (tagInfo.fullMatch) {
         const instructionMatch = tagInfo.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
         if (instructionMatch) {
@@ -859,41 +936,70 @@ async function processMessageTags(messageId) {
     
     if (!settings.enabled) return;
     
+    // Prevent duplicate processing
     if (processingMessages.has(messageId)) {
+        iigLog('WARN', `Message ${messageId} is already being processed, skipping`);
         return;
     }
     
     const message = context.chat[messageId];
     if (!message || message.is_user) return;
     
+    // Check for tags, with file existence check to catch LLM hallucinations
     const tags = await parseImageTags(message.mes, { checkExistence: true });
-    if (tags.length === 0) return;
+    iigLog('INFO', `parseImageTags returned: ${tags.length} tags`);
+    if (tags.length > 0) {
+        iigLog('INFO', `First tag: ${JSON.stringify(tags[0]).substring(0, 200)}`);
+    }
+    if (tags.length === 0) {
+        iigLog('INFO', 'No tags found by parser');
+        return;
+    }
     
+    // Mark as processing
     processingMessages.add(messageId);
+    iigLog('INFO', `Found ${tags.length} image tag(s) in message ${messageId}`);
     toastr.info(`Найдено тегов: ${tags.length}. Генерация...`, 'Генерация картинок', { timeOut: 3000 });
     
+    // DOM is ready because we use CHARACTER_MESSAGE_RENDERED event
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) {
         console.error('[IIG] Message element not found for ID:', messageId);
+        toastr.error('Не удалось найти элемент сообщения', 'Генерация картинок');
         return;
     }
     
     const mesTextEl = messageElement.querySelector('.mes_text');
     if (!mesTextEl) return;
     
+    // Process each tag in parallel
     const processTag = async (tag, index) => {
         const tagId = `iig-${messageId}-${index}`;
         
+        iigLog('INFO', `Processing tag ${index}: ${tag.fullMatch.substring(0, 50)}`);
+        
+        // Create loading placeholder
         const loadingPlaceholder = createLoadingPlaceholder(tagId);
         let targetElement = null;
         
         if (tag.isNewFormat) {
+            // NEW FORMAT: <img data-iig-instruction='...'> is a real DOM element
+            // Find it by looking for img with data-iig-instruction attribute
             const allImgs = mesTextEl.querySelectorAll('img[data-iig-instruction]');
+            iigLog('INFO', `Searching for img element. Found ${allImgs.length} img[data-iig-instruction] elements in DOM`);
+            
+            // Debug: log what we're looking for vs what's in DOM
             const searchPrompt = tag.prompt.substring(0, 30);
+            iigLog('INFO', `Searching for prompt starting with: "${searchPrompt}"`);
             
             for (const img of allImgs) {
                 const instruction = img.getAttribute('data-iig-instruction');
+                const src = img.getAttribute('src') || '';
+                iigLog('INFO', `DOM img - src: "${src.substring(0, 50)}", instruction (first 100): "${instruction?.substring(0, 100)}"`);
+                
+                // Try multiple matching strategies
                 if (instruction) {
+                    // Strategy 1: Decode HTML entities and normalize quotes, then match
                     const decodedInstruction = instruction
                         .replace(/&quot;/g, '"')
                         .replace(/&apos;/g, "'")
@@ -901,6 +1007,7 @@ async function processMessageTags(messageId) {
                         .replace(/&#34;/g, '"')
                         .replace(/&amp;/g, '&');
                     
+                    // Also normalize the search prompt the same way
                     const normalizedSearchPrompt = searchPrompt
                         .replace(/&quot;/g, '"')
                         .replace(/&apos;/g, "'")
@@ -908,24 +1015,66 @@ async function processMessageTags(messageId) {
                         .replace(/&#34;/g, '"')
                         .replace(/&amp;/g, '&');
                     
+                    // Check if decoded instruction contains the prompt
                     if (decodedInstruction.includes(normalizedSearchPrompt)) {
+                        iigLog('INFO', `Found img element via decoded instruction match`);
+                        targetElement = img;
+                        break;
+                    }
+                    
+                    // Strategy 2: Try to parse the instruction as JSON and compare prompts
+                    try {
+                        const normalizedJson = decodedInstruction.replace(/'/g, '"');
+                        const instructionData = JSON.parse(normalizedJson);
+                        if (instructionData.prompt && instructionData.prompt.substring(0, 30) === tag.prompt.substring(0, 30)) {
+                            iigLog('INFO', `Found img element via JSON prompt match`);
+                            targetElement = img;
+                            break;
+                        }
+                    } catch (e) {
+                        // JSON parse failed, continue with other strategies
+                    }
+                    
+                    // Strategy 3: Raw instruction contains raw search prompt (original approach)
+                    if (instruction.includes(searchPrompt)) {
+                        iigLog('INFO', `Found img element via raw instruction match`);
                         targetElement = img;
                         break;
                     }
                 }
             }
             
+            // Alternative: find by src containing markers (when prompt matching fails)
             if (!targetElement) {
+                iigLog('INFO', `Prompt matching failed, trying src marker matching...`);
+                for (const img of allImgs) {
+                    const src = img.getAttribute('src') || '';
+                    // Check for generation markers or empty/broken src
+                    if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]') || src === '' || src === '#') {
+                        iigLog('INFO', `Found img element with generation marker in src: "${src}"`);
+                        targetElement = img;
+                        break;
+                    }
+                }
+            }
+            
+            // Strategy 4: If still not found, try looking at ALL imgs (not just those with data-iig-instruction attr)
+            // This handles cases where browser didn't parse data-iig-instruction as a valid attribute
+            if (!targetElement) {
+                iigLog('INFO', `Trying broader img search...`);
                 const allImgsInMes = mesTextEl.querySelectorAll('img');
                 for (const img of allImgsInMes) {
                     const src = img.getAttribute('src') || '';
+                    // Look for src containing our markers
                     if (src.includes('[IMG:GEN]') || src.includes('[IMG:ERROR]')) {
+                        iigLog('INFO', `Found img via broad search with marker src: "${src.substring(0, 50)}"`);
                         targetElement = img;
                         break;
                     }
                 }
             }
         } else {
+            // LEGACY FORMAT: [IMG:GEN:{...}] - use regex replacement
             const tagEscaped = tag.fullMatch
                 .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
                 .replace(/"/g, '(?:"|&quot;)');
@@ -939,22 +1088,36 @@ async function processMessageTags(messageId) {
             
             if (beforeReplace !== mesTextEl.innerHTML) {
                 targetElement = mesTextEl.querySelector(`[data-iig-placeholder="${tagId}"]`);
+                iigLog('INFO', `Legacy tag replaced with placeholder span`);
             }
             
+            // Also check for img src containing legacy tag
             if (!targetElement) {
                 const allImgs = mesTextEl.querySelectorAll('img');
                 for (const img of allImgs) {
                     if (img.src && img.src.includes('[IMG:GEN:')) {
                         targetElement = img;
+                        iigLog('INFO', `Found img with legacy tag in src`);
                         break;
                     }
                 }
             }
         }
         
+        // Replace target with placeholder, preserving parent styling context
         if (targetElement) {
+            // Copy some styling context from parent for adaptive placeholder
+            const parent = targetElement.parentElement;
+            if (parent) {
+                const parentStyle = window.getComputedStyle(parent);
+                if (parentStyle.display === 'flex' || parentStyle.display === 'grid') {
+                    loadingPlaceholder.style.alignSelf = 'center';
+                }
+            }
             targetElement.replaceWith(loadingPlaceholder);
+            iigLog('INFO', `Loading placeholder shown (replaced target element)`);
         } else {
+            iigLog('WARN', `Could not find target element, appending placeholder as fallback`);
             mesTextEl.appendChild(loadingPlaceholder);
         }
         
@@ -968,15 +1131,18 @@ async function processMessageTags(messageId) {
                 { aspectRatio: tag.aspectRatio, imageSize: tag.imageSize, quality: tag.quality }
             );
             
+            // Save image to file instead of keeping base64
             statusEl.textContent = 'Сохранение...';
             const imagePath = await saveImageToFile(dataUrl);
             
+            // Replace placeholder with actual image
             const img = document.createElement('img');
             img.className = 'iig-generated-image';
             img.src = imagePath;
             img.alt = tag.prompt;
             img.title = `Style: ${tag.style}\nPrompt: ${tag.prompt}`;
             
+            // Preserve instruction for future regenerations (new format only)
             if (tag.isNewFormat) {
                 const instructionMatch = tag.fullMatch.match(/data-iig-instruction\s*=\s*(['"])([\s\S]*?)\1/i);
                 if (instructionMatch) {
@@ -986,38 +1152,78 @@ async function processMessageTags(messageId) {
             
             loadingPlaceholder.replaceWith(img);
             
+            // Update message.mes to persist the image
             if (tag.isNewFormat) {
+                // NEW FORMAT: <img data-iig-instruction="..." src="[IMG:GEN]">
+                // Just update the src attribute with the real path
+                // LLM sees same format but with real path = already generated
                 const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
                 message.mes = message.mes.replace(tag.fullMatch, updatedTag);
             } else {
+                // LEGACY FORMAT: [IMG:GEN:{...}]
+                // Replace with completion marker so LLM doesn't copy it
                 const completionMarker = `[IMG:✓:${imagePath}]`;
                 message.mes = message.mes.replace(tag.fullMatch, completionMarker);
             }
             
+            iigLog('INFO', `Successfully generated image for tag ${index}`);
             toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
         } catch (error) {
+            iigLog('ERROR', `Failed to generate image for tag ${index}:`, error.message);
+            
+            // Replace with error placeholder
             const errorPlaceholder = createErrorPlaceholder(tagId, error.message, tag);
             loadingPlaceholder.replaceWith(errorPlaceholder);
             
+            // IMPORTANT: Mark tag as failed in message.mes - use error.svg path so it displays properly after swipe
             if (tag.isNewFormat) {
+                // NEW FORMAT: update src with error image path (will be detected for retry)
                 const errorTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${ERROR_IMAGE_PATH}"`);
                 message.mes = message.mes.replace(tag.fullMatch, errorTag);
             } else {
+                // LEGACY FORMAT: replace with error marker
                 const errorMarker = `[IMG:ERROR:${error.message.substring(0, 50)}]`;
                 message.mes = message.mes.replace(tag.fullMatch, errorMarker);
             }
+            iigLog('INFO', `Marked tag as failed in message.mes`);
             
             toastr.error(`Ошибка генерации: ${error.message}`, 'Генерация картинок');
         }
     };
     
     try {
+        // Process all tags in parallel
         await Promise.all(tags.map((tag, index) => processTag(tag, index)));
     } finally {
+        // Always remove from processing set
         processingMessages.delete(messageId);
+        iigLog('INFO', `Finished processing message ${messageId}`);
     }
     
+    // Save chat to persist changes
     await context.saveChat();
+    
+    // Force re-render the message to show updated content
+    // Use SillyTavern's messageFormatting if available
+    if (typeof context.messageFormatting === 'function') {
+        const formattedMessage = context.messageFormatting(
+            message.mes,
+            message.name,
+            message.is_system,
+            message.is_user,
+            messageId
+        );
+        mesTextEl.innerHTML = formattedMessage;
+        console.log('[IIG] Message re-rendered via messageFormatting');
+    } else {
+        // Fallback: trigger a manual re-render by finding and updating the element
+        const freshMessageEl = document.querySelector(`#chat .mes[mesid="${messageId}"] .mes_text`);
+        if (freshMessageEl && message.mes) {
+            // Simple approach: just reload the message content
+            // This works because message.mes now contains the image path instead of the tag
+            console.log('[IIG] Attempting manual refresh...');
+        }
+    }
 }
 
 /**
@@ -1032,6 +1238,7 @@ async function regenerateMessageImages(messageId) {
         return;
     }
     
+    // Parse ALL instruction tags, forcing regeneration
     const tags = await parseImageTags(message.mes, { forceAll: true });
     
     if (tags.length === 0) {
@@ -1039,7 +1246,10 @@ async function regenerateMessageImages(messageId) {
         return;
     }
     
+    iigLog('INFO', `Regenerating ${tags.length} images in message ${messageId}`);
     toastr.info(`Перегенерация ${tags.length} картинок...`, 'Генерация картинок');
+    
+    // Process using existing logic
     processingMessages.add(messageId);
     
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
@@ -1059,9 +1269,12 @@ async function regenerateMessageImages(messageId) {
         const tagId = `iig-regen-${messageId}-${index}`;
         
         try {
+            // Find the existing img element with data-iig-instruction
             const existingImg = mesTextEl.querySelector(`img[data-iig-instruction]`);
             if (existingImg) {
+                // Preserve the instruction for future regenerations
                 const instruction = existingImg.getAttribute('data-iig-instruction');
+                
                 const loadingPlaceholder = createLoadingPlaceholder(tagId);
                 existingImg.replaceWith(loadingPlaceholder);
                 
@@ -1081,31 +1294,37 @@ async function regenerateMessageImages(messageId) {
                 img.className = 'iig-generated-image';
                 img.src = imagePath;
                 img.alt = tag.prompt;
+                // Preserve instruction for future regenerations
                 if (instruction) {
                     img.setAttribute('data-iig-instruction', instruction);
                 }
                 loadingPlaceholder.replaceWith(img);
                 
+                // Update message.mes
                 const updatedTag = tag.fullMatch.replace(/src\s*=\s*(['"])[^'"]*\1/i, `src="${imagePath}"`);
                 message.mes = message.mes.replace(tag.fullMatch, updatedTag);
                 
                 toastr.success(`Картинка ${index + 1}/${tags.length} готова`, 'Генерация картинок', { timeOut: 2000 });
             }
         } catch (error) {
+            iigLog('ERROR', `Regeneration failed for tag ${index}:`, error.message);
             toastr.error(`Ошибка: ${error.message}`, 'Генерация картинок');
         }
     }
     
     processingMessages.delete(messageId);
     await context.saveChat();
+    iigLog('INFO', `Regeneration complete for message ${messageId}`);
 }
 
 /**
- * Add regenerate button to message extra menu
+ * Add regenerate button to message extra menu (three dots)
  */
 function addRegenerateButton(messageElement, messageId) {
+    // Check if button already exists
     if (messageElement.querySelector('.iig-regenerate-btn')) return;
     
+    // Find the extraMesButtons container (three dots menu)
     const extraMesButtons = messageElement.querySelector('.extraMesButtons');
     if (!extraMesButtons) return;
     
@@ -1129,6 +1348,7 @@ function addButtonsToExistingMessages() {
     if (!context.chat || context.chat.length === 0) return;
     
     const messageElements = document.querySelectorAll('#chat .mes');
+    let addedCount = 0;
     
     for (const messageElement of messageElements) {
         const mesId = messageElement.getAttribute('mesid');
@@ -1137,24 +1357,40 @@ function addButtonsToExistingMessages() {
         const messageId = parseInt(mesId, 10);
         const message = context.chat[messageId];
         
+        // Only add to AI messages (not user messages)
         if (message && !message.is_user) {
             addRegenerateButton(messageElement, messageId);
+            addedCount++;
         }
     }
+    
+    iigLog('INFO', `Added regenerate buttons to ${addedCount} existing messages`);
 }
 
+// NOTE: No click handlers on error images - user uses the regenerate button in message menu
+
 /**
- * Handle new messages
+ * Handle CHARACTER_MESSAGE_RENDERED event
+ * This fires AFTER the message is rendered to DOM
  */
 async function onMessageReceived(messageId) {
+    iigLog('INFO', `onMessageReceived: ${messageId}`);
+    
     const settings = getSettings();
-    if (!settings.enabled) return;
+    if (!settings.enabled) {
+        iigLog('INFO', 'Extension disabled, skipping');
+        return;
+    }
     
     const context = SillyTavern.getContext();
+    const message = context.chat[messageId];
+    
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) return;
     
+    // Always add regenerate button for AI messages
     addRegenerateButton(messageElement, messageId);
+    
     await processMessageTags(messageId);
 }
 
@@ -1170,9 +1406,6 @@ function createSettingsUI() {
         console.error('[IIG] Settings container not found');
         return;
     }
-    
-    // Защита от null/undefined в модели
-    const currentModel = settings.model || '';
     
     const html = `
         <div class="inline-drawer">
@@ -1194,22 +1427,22 @@ function createSettingsUI() {
                     <div class="flex-row">
                         <label for="iig_api_type">Тип API</label>
                         <select id="iig_api_type" class="flex1">
-                            <option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-совместимый (/v1/images/generations)</option>
+                            <option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>Прямой URL (OpenAI формат)</option>
                             <option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-совместимый (nano-banana)</option>
                         </select>
                     </div>
                     
                     <div class="flex-row">
-                        <label for="iig_endpoint">URL эндпоинта</label>
+                        <label for="iig_endpoint">Полный URL</label>
                         <input type="text" id="iig_endpoint" class="text_pole flex1" 
-                               value="${settings.endpoint || ''}" 
-                               placeholder="https://api.example.com">
+                               value="${settings.endpoint}" 
+                               placeholder="Например: http://localhost:8045/v1/images/generations">
                     </div>
                     
                     <div class="flex-row">
                         <label for="iig_api_key">API ключ</label>
                         <input type="password" id="iig_api_key" class="text_pole flex1" 
-                               value="${settings.apiKey || ''}">
+                               value="${settings.apiKey}">
                         <div id="iig_key_toggle" class="menu_button iig-key-toggle" title="Показать/Скрыть">
                             <i class="fa-solid fa-eye"></i>
                         </div>
@@ -1217,9 +1450,12 @@ function createSettingsUI() {
                     
                     <div class="flex-row">
                         <label for="iig_model">Модель</label>
-                        <input type="text" id="iig_model" class="text_pole flex1" 
-                               value="${currentModel}" 
-                               placeholder="Впиши имя модели вручную">
+                        <select id="iig_model" class="flex1">
+                            ${settings.model ? `<option value="${settings.model}" selected>${settings.model}</option>` : '<option value="">-- Выберите модель --</option>'}
+                        </select>
+                        <div id="iig_refresh_models" class="menu_button iig-refresh-btn" title="Обновить список">
+                            <i class="fa-solid fa-sync"></i>
+                        </div>
                     </div>
                     
                     <hr>
@@ -1355,6 +1591,7 @@ function bindSettingsEvents() {
         settings.apiType = e.target.value;
         saveSettings();
         
+        // Show/hide avatar section
         const avatarSection = document.getElementById('iig_avatar_section');
         if (avatarSection) {
             avatarSection.classList.toggle('hidden', e.target.value !== 'gemini');
@@ -1386,16 +1623,46 @@ function bindSettingsEvents() {
         }
     });
     
-    // Model (Обработка ручного ввода)
-    document.getElementById('iig_model')?.addEventListener('input', (e) => {
+    // Model
+    document.getElementById('iig_model')?.addEventListener('change', (e) => {
         settings.model = e.target.value;
         saveSettings();
         
-        // Авто-переключение на Gemini если в названии есть 'nano-banana'
+        // Auto-switch API type based on model
         if (isGeminiModel(e.target.value)) {
             document.getElementById('iig_api_type').value = 'gemini';
             settings.apiType = 'gemini';
             document.getElementById('iig_avatar_section')?.classList.remove('hidden');
+        }
+    });
+    
+    // Refresh models
+    document.getElementById('iig_refresh_models')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.classList.add('loading');
+        
+        try {
+            const models = await fetchModels();
+            const select = document.getElementById('iig_model');
+            
+            // Keep current selection if it exists in new list
+            const currentModel = settings.model;
+            
+            select.innerHTML = '<option value="">-- Выберите модель --</option>';
+            
+            for (const model of models) {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                option.selected = model === currentModel;
+                select.appendChild(option);
+            }
+            
+            toastr.success(`Найдено моделей: ${models.length}`, 'Генерация картинок');
+        } catch (error) {
+            toastr.error('Ошибка загрузки моделей', 'Генерация картинок');
+        } finally {
+            btn.classList.remove('loading');
         }
     });
     
@@ -1434,6 +1701,7 @@ function bindSettingsEvents() {
         settings.sendUserAvatar = e.target.checked;
         saveSettings();
         
+        // Show/hide avatar selection row
         const avatarRow = document.getElementById('iig_user_avatar_row');
         if (avatarRow) {
             avatarRow.classList.toggle('hidden', !e.target.checked);
@@ -1498,26 +1766,45 @@ function bindSettingsEvents() {
 (function init() {
     const context = SillyTavern.getContext();
     
+    // Debug: log available event types
+    console.log('[IIG] Available event_types:', context.event_types);
+    console.log('[IIG] CHARACTER_MESSAGE_RENDERED:', context.event_types.CHARACTER_MESSAGE_RENDERED);
+    console.log('[IIG] MESSAGE_SWIPED:', context.event_types.MESSAGE_SWIPED);
+    
     // Load settings
     getSettings();
     
     // Create settings UI when app is ready
     context.eventSource.on(context.event_types.APP_READY, () => {
         createSettingsUI();
+        // Add buttons to any messages already in chat
         addButtonsToExistingMessages();
         console.log('[IIG] Inline Image Generation extension loaded');
     });
     
     // When chat is loaded/changed, add buttons to all existing messages
     context.eventSource.on(context.event_types.CHAT_CHANGED, () => {
+        iigLog('INFO', 'CHAT_CHANGED event - adding buttons to existing messages');
+        // Small delay to ensure DOM is ready
         setTimeout(() => {
             addButtonsToExistingMessages();
         }, 100);
     });
     
+    // Wrapper to add debug logging
     const handleMessage = async (messageId) => {
+        console.log('[IIG] Event triggered for message:', messageId);
         await onMessageReceived(messageId);
     };
     
+    // Listen for new messages AFTER they're rendered in DOM
+    // CHARACTER_MESSAGE_RENDERED fires after addOneMessage() completes
+    // This is the ONLY event we handle - no auto-retry on swipe/update
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, handleMessage);
+    
+    // NOTE: We intentionally DO NOT handle MESSAGE_SWIPED or MESSAGE_UPDATED
+    // Swipe = user wants NEW content, not to retry old error images
+    // If user wants to retry failed images, they use the regenerate button in menu
+    
+    console.log('[IIG] Inline Image Generation extension initialized');
 })();
