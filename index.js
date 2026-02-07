@@ -378,14 +378,14 @@
         return imageData;
     }
 
-    /**
+/**
      * Generate image via Gemini-compatible endpoint (nano-banana)
      */
     async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
         const settings = getSettings();
         const model = settings.model;
         
-        // FIX: Add ?key=... parameter
+        // Добавляем ключ в URL
         const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent?key=${settings.apiKey}`;
         
         let aspectRatio = options.aspectRatio || settings.aspectRatio || '1:1';
@@ -402,7 +402,12 @@
         
         const parts = [];
         
-        // Add reference images
+        // ВАЖНО: Даже если настройки включены, этот код ниже
+        // позволяет временно принудительно отключить референсы для теста,
+        // если раскомментировать следующую строку:
+        // referenceImages = []; 
+
+        // Добавляем референсы (если они есть)
         for (const imgB64 of referenceImages.slice(0, 4)) {
             parts.push({
                 inlineData: {
@@ -414,6 +419,7 @@
         
         let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
         
+        // Если есть референсы, добавляем инструкцию
         if (referenceImages.length > 0) {
             const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). Copy their visual features precisely.]`;
             fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
@@ -451,27 +457,29 @@
         }
         
         const result = await response.json();
+        // Пишем полный ответ в консоль браузера (F12)
         console.log('[IIG] Gemini Raw Response:', result);
         
         const candidates = result.candidates || [];
         if (candidates.length === 0) {
-            // Check for explicit error or finish reason
             if (result.promptFeedback && result.promptFeedback.blockReason) {
-                throw new Error(`Блокировка промпта: ${result.promptFeedback.blockReason}`);
+                throw new Error(`Блокировка промпта (Safety): ${result.promptFeedback.blockReason}`);
             }
-            throw new Error('No candidates in response (пустой ответ от модели). Возможно, сработал Safety Filter.');
+            throw new Error('Пустой ответ от модели (возможно, жесткий Safety Filter).');
         }
 
+        // 1. Проверяем Finish Reason
         const finishReason = candidates[0].finishReason;
         if (finishReason && finishReason !== 'STOP') {
              iigLog('WARN', `Gemini finishReason: ${finishReason}`);
-             if (finishReason === 'SAFETY' || finishReason === 'BLOCK_ONLY_HIGH') {
-                 throw new Error(`Отказ генерации (Safety Filter). Отключите аватарки или измените промпт.`);
+             if (finishReason === 'SAFETY' || finishReason === 'BLOCK_ONLY_HIGH' || finishReason === 'RECITATION') {
+                 throw new Error(`Отказ генерации (фильтр безопасности: ${finishReason}).`);
              }
         }
         
         const responseParts = candidates[0].content?.parts || [];
         
+        // 2. Ищем картинку
         for (const part of responseParts) {
             if (part.inlineData) {
                 return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
@@ -480,24 +488,15 @@
                 return `data:${part.inline_data.mime_type};base64,${part.inline_data.data}`;
             }
         }
-        
-        throw new Error('Картинка не найдена в ответе Gemini');
-    }
 
-    /**
-     * Validate settings before generation
-     */
-    function validateSettings() {
-        const settings = getSettings();
-        const errors = [];
-        
-        if (!settings.endpoint) errors.push('URL эндпоинта не настроен');
-        if (!settings.apiKey) errors.push('API ключ не настроен');
-        if (!settings.model) errors.push('Модель не выбрана');
-        
-        if (errors.length > 0) {
-            throw new Error(`Ошибка настроек: ${errors.join(', ')}`);
+        // 3. Ищем ТЕКСТ (Объяснение отказа) - Самое важное улучшение!
+        const textPart = responseParts.find(p => p.text);
+        if (textPart) {
+            // Часто модель пишет "I cannot generate images of..."
+            throw new Error(`Модель отказалась рисовать и ответила текстом: "${textPart.text.substring(0, 200)}..."`);
         }
+        
+        throw new Error('В ответе нет ни картинки, ни текста ошибки.');
     }
 
     /**
