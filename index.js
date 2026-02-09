@@ -45,23 +45,23 @@
         toastr.success('Логи экспортированы', 'Генерация картинок');
     }
 
-    // Default settings (Merged from both files)
+    // Default settings
     const defaultSettings = Object.freeze({
         enabled: true,
         apiType: 'gemini', 
         endpoint: '',
         apiKey: '',
         model: '',
-        size: '1024x1024', // For OpenAI
-        quality: 'standard', // For OpenAI
+        size: '1024x1024',
+        quality: 'standard',
         maxRetries: 0, 
         retryDelay: 1000,
-        // Nano-banana specific (transferred settings)
+        // Nano-banana specific
         sendCharAvatar: false,
         sendUserAvatar: false,
         userAvatarFile: '', 
         aspectRatio: '1:1', 
-        imageSize: '1K', 
+        imageSize: '1K', // Вернули настройку размера
     });
 
     // Valid aspect ratios for Gemini/nano-banana
@@ -145,7 +145,6 @@
             return [];
         }
         
-        // Try to guess URL if user didn't provide full path
         let url = settings.endpoint;
         if (!url.endsWith('/models') && !url.includes('generateContent')) {
             url = `${settings.endpoint.replace(/\/$/, '')}/v1/models`;
@@ -472,7 +471,7 @@
             if (result.promptFeedback && result.promptFeedback.blockReason) {
                 throw new Error(`Блокировка промпта (Safety): ${result.promptFeedback.blockReason}`);
             }
-            throw new Error('Пустой ответ от модели (возможно, жесткий Safety Filter).');
+            throw new Error('Пустой ответ от модели.');
         }
 
         const responseParts = candidates[0].content?.parts || [];
@@ -1124,9 +1123,16 @@
                         <hr>
                         <div id="iig_avatar_section" class="iig-avatar-section ${settings.apiType !== 'gemini' ? 'hidden' : ''}">
                             <h4>Настройки Nano-Banana</h4>
-                            
                             <div class="flex-row">
-                                <label for="iig_aspect_ratio">Соотношение сторон</label>
+                                <label for="iig_image_size">Разрешение</label>
+                                <select id="iig_image_size" class="flex1">
+                                    <option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K (Стандарт)</option>
+                                    <option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K (Высокое)</option>
+                                    <option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K (Ультра)</option>
+                                </select>
+                            </div>
+                            <div class="flex-row">
+                                <label for="iig_aspect_ratio">Соотношение</label>
                                 <select id="iig_aspect_ratio" class="flex1">
                                     <option value="1:1" ${settings.aspectRatio === '1:1' ? 'selected' : ''}>1:1 (Квадрат)</option>
                                     <option value="2:3" ${settings.aspectRatio === '2:3' ? 'selected' : ''}>2:3 (Портрет)</option>
@@ -1137,44 +1143,17 @@
                                     <option value="5:4" ${settings.aspectRatio === '5:4' ? 'selected' : ''}>5:4 (Альбом)</option>
                                     <option value="9:16" ${settings.aspectRatio === '9:16' ? 'selected' : ''}>9:16 (Вертикальный)</option>
                                     <option value="16:9" ${settings.aspectRatio === '16:9' ? 'selected' : ''}>16:9 (Широкий)</option>
-                                    <option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9 (Ультраширокий)</option>
+                                    <option value="21:9" ${settings.aspectRatio === '21:9' ? 'selected' : ''}>21:9 (Кино)</option>
                                 </select>
                             </div>
-                            
-                            <div class="flex-row">
-                                <label for="iig_image_size">Разрешение</label>
-                                <select id="iig_image_size" class="flex1">
-                                    <option value="1K" ${settings.imageSize === '1K' ? 'selected' : ''}>1K (по умолчанию)</option>
-                                    <option value="2K" ${settings.imageSize === '2K' ? 'selected' : ''}>2K</option>
-                                    <option value="4K" ${settings.imageSize === '4K' ? 'selected' : ''}>4K</option>
-                                </select>
-                            </div>
-                            
-                            <hr>
-                            
-                            <h5>Референсы</h5>
-                            <p class="hint">Отправлять аватарки как референсы для консистентной генерации персонажей.</p>
-                            
                             <label class="checkbox_label">
                                 <input type="checkbox" id="iig_send_char_avatar" ${settings.sendCharAvatar ? 'checked' : ''}>
-                                <span>Отправлять аватар {{char}}</span>
+                                <span>Отправлять аватар {{char}} (Может вызвать блок Safety!)</span>
                             </label>
-                            
                             <label class="checkbox_label">
                                 <input type="checkbox" id="iig_send_user_avatar" ${settings.sendUserAvatar ? 'checked' : ''}>
                                 <span>Отправлять аватар {{user}}</span>
                             </label>
-                            
-                            <div id="iig_user_avatar_row" class="flex-row ${!settings.sendUserAvatar ? 'hidden' : ''}" style="margin-top: 5px;">
-                                <label for="iig_user_avatar_file">Аватар {{user}}</label>
-                                <select id="iig_user_avatar_file" class="flex1">
-                                    <option value="">-- Не выбран --</option>
-                                    ${settings.userAvatarFile ? `<option value="${settings.userAvatarFile}" selected>${settings.userAvatarFile}</option>` : ''}
-                                </select>
-                                <div id="iig_refresh_avatars" class="menu_button iig-refresh-btn" title="Обновить список">
-                                    <i class="fa-solid fa-sync"></i>
-                                </div>
-                            </div>
                         </div>
                         <hr>
                         <div class="flex-row">
@@ -1254,15 +1233,14 @@
             }
         });
         
-        // --- NANO BANANA SETTINGS ---
-        
-        document.getElementById('iig_aspect_ratio')?.addEventListener('change', (e) => {
-            settings.aspectRatio = e.target.value;
-            saveSettings();
-        });
-        
+        // ДОБАВЛЕНО: Обработчик размера картинки
         document.getElementById('iig_image_size')?.addEventListener('change', (e) => {
             settings.imageSize = e.target.value;
+            saveSettings();
+        });
+
+        document.getElementById('iig_aspect_ratio')?.addEventListener('change', (e) => {
+            settings.aspectRatio = e.target.value;
             saveSettings();
         });
         
@@ -1274,44 +1252,6 @@
         document.getElementById('iig_send_user_avatar')?.addEventListener('change', (e) => {
             settings.sendUserAvatar = e.target.checked;
             saveSettings();
-            
-            // Show/hide avatar selection row
-            const avatarRow = document.getElementById('iig_user_avatar_row');
-            if (avatarRow) {
-                avatarRow.classList.toggle('hidden', !e.target.checked);
-            }
-        });
-        
-        document.getElementById('iig_user_avatar_file')?.addEventListener('change', (e) => {
-            settings.userAvatarFile = e.target.value;
-            saveSettings();
-        });
-        
-        document.getElementById('iig_refresh_avatars')?.addEventListener('click', async (e) => {
-            const btn = e.currentTarget;
-            btn.classList.add('loading');
-            
-            try {
-                const avatars = await fetchUserAvatars();
-                const select = document.getElementById('iig_user_avatar_file');
-                const currentAvatar = settings.userAvatarFile;
-                
-                select.innerHTML = '<option value="">-- Не выбран --</option>';
-                
-                for (const avatar of avatars) {
-                    const option = document.createElement('option');
-                    option.value = avatar;
-                    option.textContent = avatar;
-                    option.selected = avatar === currentAvatar;
-                    select.appendChild(option);
-                }
-                
-                toastr.success(`Найдено аватаров: ${avatars.length}`, 'Генерация картинок');
-            } catch (error) {
-                toastr.error('Ошибка загрузки аватаров', 'Генерация картинок');
-            } finally {
-                btn.classList.remove('loading');
-            }
         });
         
         document.getElementById('iig_export_logs')?.addEventListener('click', () => {
