@@ -61,7 +61,7 @@
         sendUserAvatar: false,
         userAvatarFile: '', 
         aspectRatio: '1:1', 
-        imageSize: '1K', // Вернули настройку размера
+        imageSize: '1K', 
     });
 
     // Valid aspect ratios for Gemini/nano-banana
@@ -69,6 +69,18 @@
     // Valid image sizes for Gemini/nano-banana
     const VALID_IMAGE_SIZES = ['1K', '2K', '4K'];
     
+    // Prompt prefixes to force aspect ratio (Hack for Imagen 3)
+    const RATIO_PROMPTS = {
+        '16:9': 'Wide landscape view, cinematic shot, 16:9 aspect ratio, ',
+        '21:9': 'Ultrawide cinematic panorama, 21:9 aspect ratio, ',
+        '9:16': 'Tall vertical portrait, full body shot, 9:16 aspect ratio, ',
+        '3:4': 'Vertical portrait, 3:4 aspect ratio, ',
+        '4:3': 'Landscape view, 4:3 aspect ratio, ',
+        '2:3': 'Vertical portrait, 2:3 aspect ratio, ',
+        '3:2': 'Landscape view, 3:2 aspect ratio, ',
+        '1:1': 'Square image, 1:1 aspect ratio, '
+    };
+
     // Image model detection keywords
     const IMAGE_MODEL_KEYWORDS = [
         'dall-e', 'midjourney', 'mj', 'journey', 'stable-diffusion', 'sdxl', 'flux',
@@ -427,6 +439,13 @@
         
         let fullPrompt = style ? `[Style: ${style}] ${prompt}` : prompt;
         
+        // --- FIX: Force aspect ratio in text prompt ---
+        if (RATIO_PROMPTS[aspectRatio]) {
+            fullPrompt = RATIO_PROMPTS[aspectRatio] + fullPrompt;
+            iigLog('INFO', `Injected ratio prompt: ${RATIO_PROMPTS[aspectRatio]}`);
+        }
+        // ----------------------------------------------
+        
         if (referenceImages.length > 0) {
             const refInstruction = `[CRITICAL: The reference image(s) above show the EXACT appearance of the character(s). Copy their visual features precisely.]`;
             fullPrompt = `${refInstruction}\n\n${fullPrompt}`;
@@ -486,7 +505,7 @@
             }
         }
 
-        // 2. Ищем ССЫЛКУ на картинку в тексте (ФИКС ДЛЯ ANTIGRAVITY)
+        // 2. Ищем ССЫЛКУ на картинку в тексте
         const textPart = responseParts.find(p => p.text);
         if (textPart) {
             const text = textPart.text;
@@ -887,10 +906,8 @@
                 
                 let imagePath;
                 if (dataUrl.startsWith('http')) {
-                    // ФИКС: Используем удаленный URL напрямую
                     imagePath = dataUrl;
                 } else {
-                    // Используем base64
                     statusEl.textContent = 'Сохранение...';
                     imagePath = await saveImageToFile(dataUrl);
                 }
